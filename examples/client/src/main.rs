@@ -6,6 +6,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut client = neutron::Pulsar::new(config);
     client.connect().await.unwrap();
-    while let Ok(_) = client.next_message().await {}
+    tokio::time::sleep(tokio::time::Duration::from_secs(1000)).await;
     Ok(())
 }

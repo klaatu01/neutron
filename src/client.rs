@@ -1,4 +1,7 @@
-use crate::{auth::PulsarAuthentication, connection};
+use crate::{
+    connection,
+    message::{proto::pulsar::MessageIdData, ClientCommand, ServerMessage},
+};
 use async_trait::async_trait;
 
 #[derive(Debug)]
@@ -29,10 +32,17 @@ pub struct PulsarConfig {
 }
 
 pub struct Pulsar {
+    #[allow(dead_code)]
     pub(crate) config: PulsarConfig,
     pub(crate) connection_manager: connection::PulsarConnectionManager,
 }
 
+pub enum CloseClient {
+    Consumer,
+    Producer,
+}
+
+#[allow(dead_code)]
 impl Pulsar {
     pub fn new(config: PulsarConfig) -> Self {
         let connection_manager = connection::PulsarConnectionManager::new(&config);
@@ -51,19 +61,36 @@ impl Pulsar {
         Ok(())
     }
 
-    async fn close(&self) -> Result<(), PulsarClientError> {
+    async fn close(&self, client_type: CloseClient) -> Result<(), PulsarClientError> {
+        // match on client type and send close message accordingly
         Ok(())
     }
 
-    async fn send_message(&self) -> Result<(), PulsarClientError> {
-        Ok(())
-    }
-
-    pub async fn next_message(&self) -> Result<(), PulsarClientError> {
+    pub(crate) async fn send_message(&self, payload: Vec<u8>) -> Result<(), PulsarClientError> {
+        let message = ClientCommand::Send(payload);
         self.connection_manager
-            .recv()
+            .send(message)
             .await
-            .map_err(|_| PulsarClientError::PulsarError("Failed to receive message".to_string()))?;
+            .map_err(|_| PulsarClientError::PulsarError("Failed to send message".to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn next_message(&self) -> Result<ServerMessage, PulsarClientError> {
+        let message =
+            self.connection_manager.recv().await.map_err(|_| {
+                PulsarClientError::PulsarError("Failed to receive message".to_string())
+            })?;
+
+        Ok(message)
+    }
+
+    pub async fn ack(&self, message_id: &MessageIdData) -> Result<(), PulsarClientError> {
+        let message = ClientCommand::Ack(vec![message_id.clone()]);
+        self.connection_manager
+            .send(message)
+            .await
+            .map_err(|_| PulsarClientError::PulsarError("Failed to send ack".to_string()))?;
         Ok(())
     }
 

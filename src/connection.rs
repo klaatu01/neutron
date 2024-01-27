@@ -1,16 +1,19 @@
-use futures::{lock::Mutex, SinkExt, StreamExt};
-use std::{collections::HashMap, sync::Arc};
+use futures::lock::Mutex;
+use std::collections::HashMap;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
 use crate::{
-    message::{proto::pulsar::MessageIdData, ClientCommands, Message, SendReceipt, ServerMessage},
+    message::{
+        proto::pulsar::{base_command, MessageIdData},
+        ClientCommand, Message, SendReceipt, ServerMessage,
+    },
     PulsarConfig,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PulsarConnectionError {
     Disconnected,
     Timeout,
@@ -44,6 +47,7 @@ impl PulsarConnection {
         let (send_tx, send_rx) = async_channel::unbounded::<Message>();
         let (recv_tx, recv_rx) = async_channel::unbounded::<Message>();
 
+        let stream_send_tx = send_tx.clone();
         tokio::spawn(async move {
             let mut buf = Vec::new();
             loop {
@@ -55,7 +59,13 @@ impl PulsarConnection {
                     }
                     Ok(_) => match Message::try_from(&buf) {
                         Ok(msg) => {
-                            println!("<- {:?}", msg.command.type_());
+                            if msg.command.type_() == base_command::Type::PING {
+                                stream_send_tx
+                                    .send(ClientCommand::Pong.into())
+                                    .await
+                                    .unwrap();
+                                continue;
+                            };
                             recv_tx.send(msg).await.unwrap();
                         }
                         Err(e) => {
@@ -150,7 +160,8 @@ impl PulsarConnectionManager {
             PulsarConnection::connect(&self.config.endpoint_url, &self.config.endpoint_port).await;
         self.connection = Some(connection);
 
-        self.send(ClientCommands::Connect { auth_data: None }.into())
+        let start = std::time::Instant::now();
+        self.send(ClientCommand::Connect { auth_data: None }.into())
             .await
             .map_err(|_| PulsarConnectionError::Timeout)?;
 
@@ -160,16 +171,17 @@ impl PulsarConnectionManager {
             .map_err(|_| PulsarConnectionError::Timeout)?;
 
         if let ServerMessage::Connected = message {
+            println!("Connected in {}ms", start.elapsed().as_millis());
             return Ok(());
         } else {
             return Err(PulsarConnectionError::UnsupportedCommand);
         }
     }
 
-    pub async fn send(&self, message: Message) -> Result<(), PulsarConnectionError> {
+    pub async fn send(&self, message: ClientCommand) -> Result<(), PulsarConnectionError> {
         if let Some(connection) = &self.connection {
             return connection
-                .send(message)
+                .send(message.into())
                 .await
                 .map_err(|_| PulsarConnectionError::Disconnected)
                 .map(|_| ());
@@ -218,7 +230,7 @@ impl PulsarConnectionManager {
                     };
                 }
                 ServerMessage::Ping => {
-                    self.send(ClientCommands::Pong.into())
+                    self.send(ClientCommand::Pong.into())
                         .await
                         .map_err(|_| PulsarConnectionError::Timeout)?;
                 }

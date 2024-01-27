@@ -32,8 +32,9 @@ pub struct Message {
     pub payload: Option<Payload>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub enum ClientCommands {
+pub enum ClientCommand {
     Send(Vec<u8>),
     Ack(Vec<MessageIdData>),
     Ping,
@@ -44,10 +45,10 @@ pub enum ClientCommands {
     AuthChallenge(Vec<u8>),
 }
 
-impl Into<Message> for ClientCommands {
+impl Into<Message> for ClientCommand {
     fn into(self) -> Message {
         let command = match &self {
-            ClientCommands::Send(_) => {
+            ClientCommand::Send(_) => {
                 let mut send = proto::pulsar::CommandSend::new();
                 send.set_producer_id(0);
                 send.set_sequence_id(0);
@@ -57,7 +58,7 @@ impl Into<Message> for ClientCommands {
                 base.set_type(proto::pulsar::base_command::Type::SEND.into());
                 base
             }
-            ClientCommands::Ack(message_ids) => {
+            ClientCommand::Ack(message_ids) => {
                 let mut ack = proto::pulsar::CommandAck::new();
                 ack.set_consumer_id(0);
 
@@ -73,21 +74,21 @@ impl Into<Message> for ClientCommands {
                 base.set_type(proto::pulsar::base_command::Type::ACK.into());
                 base
             }
-            ClientCommands::Ping => {
+            ClientCommand::Ping => {
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.set_type(proto::pulsar::base_command::Type::PING);
                 let ping = proto::pulsar::CommandPing::new();
                 base.ping = MessageField::some(ping);
                 base
             }
-            ClientCommands::Pong => {
+            ClientCommand::Pong => {
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.set_type(proto::pulsar::base_command::Type::PONG);
                 let pong = proto::pulsar::CommandPong::new();
                 base.pong = MessageField::some(pong);
                 base
             }
-            ClientCommands::Connect { auth_data } => {
+            ClientCommand::Connect { auth_data } => {
                 let mut connect = proto::pulsar::CommandConnect::new();
                 connect.set_client_version("0.0.1".to_string());
                 connect.set_protocol_version(21);
@@ -102,17 +103,17 @@ impl Into<Message> for ClientCommands {
                 base.set_type(proto::pulsar::base_command::Type::CONNECT.into());
                 base
             }
-            ClientCommands::CloseProducer => {
+            ClientCommand::CloseProducer => {
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.set_type(proto::pulsar::base_command::Type::CLOSE_PRODUCER.into());
                 base
             }
-            ClientCommands::CloseConsumer => {
+            ClientCommand::CloseConsumer => {
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.set_type(proto::pulsar::base_command::Type::CLOSE_CONSUMER.into());
                 base
             }
-            ClientCommands::AuthChallenge(bytes) => {
+            ClientCommand::AuthChallenge(bytes) => {
                 let mut auth_challenge = proto::pulsar::CommandAuthChallenge::new();
                 let mut auth_data = AuthData::new();
                 auth_data.set_auth_data(bytes.to_vec());
@@ -125,7 +126,7 @@ impl Into<Message> for ClientCommands {
         };
 
         let payload = match self {
-            ClientCommands::Send(bytes) => Some(Payload {
+            ClientCommand::Send(bytes) => Some(Payload {
                 metadata: MessageMetadata::new(),
                 data: bytes,
             }),
@@ -136,6 +137,8 @@ impl Into<Message> for ClientCommands {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub enum ServerMessage {
     SendReceipt {
         message_id: MessageIdData,
@@ -153,7 +156,7 @@ impl TryFrom<Message> for ServerMessage {
     type Error = std::io::Error;
     fn try_from(message: Message) -> Result<ServerMessage, Self::Error> {
         let command = message.command;
-        let payload = message.payload;
+        let _payload = message.payload;
         match command.type_() {
             //           proto::pulsar::base_command::Type::SEND_RECEIPT => {
             //               let send_receipt =
