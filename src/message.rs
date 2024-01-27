@@ -4,9 +4,9 @@ use nom::{
     number::streaming::{be_u16, be_u32},
     IResult,
 };
-use protobuf::Message as _;
+use protobuf::{Message as _, MessageField};
 
-use self::proto::pulsar::{BaseCommand, CommandSendReceipt, MessageIdData, MessageMetadata};
+use self::proto::pulsar::{AuthData, BaseCommand, MessageIdData, MessageMetadata};
 
 pub mod proto {
     #![allow(clippy::all)]
@@ -32,6 +32,170 @@ pub struct Message {
     pub payload: Option<Payload>,
 }
 
+#[derive(Debug, Clone)]
+pub enum ClientCommands {
+    Send(Vec<u8>),
+    Ack(Vec<MessageIdData>),
+    Ping,
+    Pong,
+    Connect { auth_data: Option<Vec<u8>> },
+    CloseProducer,
+    CloseConsumer,
+    AuthChallenge(Vec<u8>),
+}
+
+impl Into<Message> for ClientCommands {
+    fn into(self) -> Message {
+        let command = match &self {
+            ClientCommands::Send(_) => {
+                let mut send = proto::pulsar::CommandSend::new();
+                send.set_producer_id(0);
+                send.set_sequence_id(0);
+                send.set_num_messages(1);
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.send = MessageField::some(send);
+                base.set_type(proto::pulsar::base_command::Type::SEND.into());
+                base
+            }
+            ClientCommands::Ack(message_ids) => {
+                let mut ack = proto::pulsar::CommandAck::new();
+                ack.set_consumer_id(0);
+
+                if message_ids.len() > 1 {
+                    ack.set_ack_type(proto::pulsar::command_ack::AckType::Cumulative);
+                } else {
+                    ack.set_ack_type(proto::pulsar::command_ack::AckType::Individual);
+                }
+
+                ack.message_id = message_ids.clone();
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.ack = MessageField::some(ack);
+                base.set_type(proto::pulsar::base_command::Type::ACK.into());
+                base
+            }
+            ClientCommands::Ping => {
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.set_type(proto::pulsar::base_command::Type::PING);
+                let ping = proto::pulsar::CommandPing::new();
+                base.ping = MessageField::some(ping);
+                base
+            }
+            ClientCommands::Pong => {
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.set_type(proto::pulsar::base_command::Type::PONG);
+                let pong = proto::pulsar::CommandPong::new();
+                base.pong = MessageField::some(pong);
+                base
+            }
+            ClientCommands::Connect { auth_data } => {
+                let mut connect = proto::pulsar::CommandConnect::new();
+                connect.set_client_version("0.0.1".to_string());
+                connect.set_protocol_version(21);
+
+                if let Some(v) = auth_data {
+                    connect.set_auth_method(proto::pulsar::AuthMethod::AuthMethodAthens);
+                    connect.set_auth_data(v.to_vec())
+                }
+
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.connect = MessageField::some(connect);
+                base.set_type(proto::pulsar::base_command::Type::CONNECT.into());
+                base
+            }
+            ClientCommands::CloseProducer => {
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.set_type(proto::pulsar::base_command::Type::CLOSE_PRODUCER.into());
+                base
+            }
+            ClientCommands::CloseConsumer => {
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.set_type(proto::pulsar::base_command::Type::CLOSE_CONSUMER.into());
+                base
+            }
+            ClientCommands::AuthChallenge(bytes) => {
+                let mut auth_challenge = proto::pulsar::CommandAuthChallenge::new();
+                let mut auth_data = AuthData::new();
+                auth_data.set_auth_data(bytes.to_vec());
+                auth_challenge.challenge = MessageField::some(auth_data);
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.authChallenge = MessageField::some(auth_challenge);
+                base.set_type(proto::pulsar::base_command::Type::AUTH_CHALLENGE.into());
+                base
+            }
+        };
+
+        let payload = match self {
+            ClientCommands::Send(bytes) => Some(Payload {
+                metadata: MessageMetadata::new(),
+                data: bytes,
+            }),
+            _ => None,
+        };
+
+        Message { command, payload }
+    }
+}
+
+pub enum ServerMessage {
+    SendReceipt {
+        message_id: MessageIdData,
+    },
+    Message {
+        message_id: MessageIdData,
+        payload: Vec<u8>,
+    },
+    Ping,
+    Connected,
+    AuthChallenge,
+}
+
+impl TryFrom<Message> for ServerMessage {
+    type Error = std::io::Error;
+    fn try_from(message: Message) -> Result<ServerMessage, Self::Error> {
+        let command = message.command;
+        let payload = message.payload;
+        match command.type_() {
+            //           proto::pulsar::base_command::Type::SEND_RECEIPT => {
+            //               let send_receipt =
+            //                   command
+            //                       .send_receipt
+            //                       .into_option()
+            //                       .ok_or(std::io::Error::new(
+            //                           std::io::ErrorKind::Other,
+            //                           "Missing send receipt",
+            //                       ))?;
+            //               let message_id =
+            //                   send_receipt
+            //                       .message_id
+            //                       .into_option()
+            //                       .ok_or(std::io::Error::new(
+            //                           std::io::ErrorKind::Other,
+            //                           "Missing message id",
+            //                       ))?;
+            //               Ok(ServerMessages::SendReceipt { message_id })
+            //           }
+            //           proto::pulsar::base_command::Type::MESSAGE => {
+            //               let message_id = command.message.unwrap().message_id.into_option().ok_or(
+            //                   std::io::Error::new(std::io::ErrorKind::Other, "Missing message id"),
+            //               )?;
+            //               let payload = payload.unwrap();
+            //               Ok(ServerMessages::Message {
+            //                   message_id,
+            //                   payload: payload.data,
+            //               })
+            //           }
+            //            proto::pulsar::base_command::Type::PONG => Ok(ServerMessages::Pong),
+            //            proto::pulsar::base_command::Type::AUTH_CHALLENGE => Ok(ServerMessages::AuthChallenge),
+            proto::pulsar::base_command::Type::CONNECTED => Ok(ServerMessage::Connected),
+            proto::pulsar::base_command::Type::PING => Ok(ServerMessage::Ping),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Unknown command type",
+            )),
+        }
+    }
+}
+
 impl TryFrom<&[u8]> for Message {
     type Error = std::io::Error;
     fn try_from(bytes: &[u8]) -> Result<Message, Self::Error> {
@@ -52,6 +216,20 @@ impl TryFrom<&[u8]> for Message {
         });
 
         Ok(Message { command, payload })
+    }
+}
+
+impl TryFrom<Vec<u8>> for Message {
+    type Error = std::io::Error;
+    fn try_from(bytes: Vec<u8>) -> Result<Message, Self::Error> {
+        bytes.as_slice().try_into()
+    }
+}
+
+impl TryFrom<&Vec<u8>> for Message {
+    type Error = std::io::Error;
+    fn try_from(bytes: &Vec<u8>) -> Result<Message, Self::Error> {
+        bytes.as_slice().try_into()
     }
 }
 
@@ -153,13 +331,13 @@ pub struct Payload {
 
 pub struct SendReceipt {
     pub message_id: MessageIdData,
-    pub rx: futures::channel::oneshot::Receiver<CommandSendReceipt>,
+    pub rx: futures::channel::oneshot::Receiver<()>,
 }
 
 impl SendReceipt {
     pub fn create_pair(
         message_id: &MessageIdData,
-    ) -> (Self, futures::channel::oneshot::Sender<CommandSendReceipt>) {
+    ) -> (Self, futures::channel::oneshot::Sender<()>) {
         let (tx, rx) = futures::channel::oneshot::channel();
         (
             Self {
@@ -171,7 +349,7 @@ impl SendReceipt {
     }
 
     // TODO: This should be a Result of valid error types
-    pub async fn wait_for_receipt(self) -> Result<CommandSendReceipt, ()> {
+    pub async fn wait_for_receipt(self) -> Result<(), ()> {
         Ok(self.rx.await.unwrap())
     }
 }

@@ -1,86 +1,97 @@
-use std::collections::HashMap;
-
 use futures::{lock::Mutex, SinkExt, StreamExt};
-use protobuf::Message;
-use url::Url;
+use std::{collections::HashMap, sync::Arc};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 use crate::{
-    message::{
-        proto::pulsar::{self, BaseCommand, CommandSendReceipt, MessageIdData},
-        SendReceipt,
-    },
+    message::{proto::pulsar::MessageIdData, ClientCommands, Message, SendReceipt, ServerMessage},
     PulsarConfig,
 };
 
+#[derive(Debug)]
 pub enum PulsarConnectionError {
     Disconnected,
     Timeout,
+    UnsupportedCommand,
 }
 
+impl std::fmt::Display for PulsarConnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            PulsarConnectionError::Disconnected => write!(f, "Disconnected"),
+            PulsarConnectionError::Timeout => write!(f, "Timeout"),
+            PulsarConnectionError::UnsupportedCommand => write!(f, "Unsupported command"),
+        }
+    }
+}
+
+impl std::error::Error for PulsarConnectionError {}
+
 pub struct PulsarConnection {
-    send_tx: async_channel::Sender<pulsar::BaseCommand>,
-    recv_rx: async_channel::Receiver<pulsar::BaseCommand>,
+    send_tx: async_channel::Sender<Message>,
+    recv_rx: async_channel::Receiver<Message>,
 }
 
 impl PulsarConnection {
     pub async fn connect(host: &String, port: &u16) -> Self {
-        let url = Url::parse(&format!("ws://{}:{}", host, port)).unwrap();
+        let addr = format!("{}:{}", host, port);
+        println!("Connecting to {}", addr);
+        let tcp_stream = TcpStream::connect(addr).await.unwrap();
+        let (mut stream, mut sink) = tokio::io::split(tcp_stream);
 
-        let (send_tx, send_rx) = async_channel::unbounded::<pulsar::BaseCommand>();
-        let (recv_tx, recv_rx) = async_channel::unbounded::<pulsar::BaseCommand>();
-
-        // let (terminate_sink_tx, terminate_sink_rx) = futures::channel::oneshot::channel();
-        // let (terminate_stream_tx, terminate_stream_rx) = futures::channel::oneshot::channel();
-
-        let (ws_stream, _) = tokio_tungstenite::connect_async(url)
-            .await
-            .expect("Failed to connect");
-
-        let (mut sink, stream) = ws_stream.split();
+        let (send_tx, send_rx) = async_channel::unbounded::<Message>();
+        let (recv_tx, recv_rx) = async_channel::unbounded::<Message>();
 
         tokio::spawn(async move {
-            stream
-                .for_each(|msg| async {
-                    match msg {
-                        Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes)) => {
-                            recv_tx
-                                .send(
-                                    pulsar::BaseCommand::parse_from_bytes(bytes.as_slice())
-                                        .unwrap(),
-                                )
-                                .await
-                                .unwrap();
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            println!("Error: {}", e);
-                        }
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match stream.read_buf(&mut buf).await {
+                    Ok(0) => {
+                        println!("Socket closed");
+                        break;
                     }
-                })
-                .await;
+                    Ok(_) => match Message::try_from(&buf) {
+                        Ok(msg) => {
+                            println!("<- {:?}", msg.command.type_());
+                            recv_tx.send(msg).await.unwrap();
+                        }
+                        Err(e) => {
+                            println!("Error while parsing message: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        println!("Error while reading from socket: {}", e);
+                        break;
+                    }
+                }
+            }
         });
 
         tokio::spawn(async move {
             while let Ok(msg) = send_rx.recv().await {
-                sink.send(tokio_tungstenite::tungstenite::Message::binary(
-                    msg.write_to_bytes().unwrap(),
-                ))
-                .await
-                .unwrap();
+                println!("-> {:?}", msg.command.type_());
+                let bytes: Vec<u8> = msg.into();
+                if let Err(e) = sink.write_all(&bytes).await {
+                    println!("Error while writing to socket: {}", e);
+                    break;
+                }
             }
         });
 
         PulsarConnection { send_tx, recv_rx }
     }
 
-    pub async fn send(&self, msg: pulsar::BaseCommand) -> Result<(), PulsarConnectionError> {
+    pub async fn send(&self, msg: Message) -> Result<(), PulsarConnectionError> {
         self.send_tx
             .send(msg)
             .await
             .map_err(|_| PulsarConnectionError::Disconnected)
     }
 
-    pub async fn recv(&self) -> Result<pulsar::BaseCommand, PulsarConnectionError> {
+    pub async fn recv(&self) -> Result<Message, PulsarConnectionError> {
         self.recv_rx
             .recv()
             .await
@@ -89,7 +100,7 @@ impl PulsarConnection {
 }
 
 pub struct ReceiptManager {
-    map: Mutex<HashMap<MessageIdData, futures::channel::oneshot::Sender<CommandSendReceipt>>>,
+    map: Mutex<HashMap<MessageIdData, futures::channel::oneshot::Sender<()>>>,
 }
 
 impl ReceiptManager {
@@ -102,7 +113,7 @@ impl ReceiptManager {
     pub async fn put_receipt(
         &self,
         message_id: &MessageIdData,
-        tx: futures::channel::oneshot::Sender<CommandSendReceipt>,
+        tx: futures::channel::oneshot::Sender<()>,
     ) {
         self.map
             .lock()
@@ -114,7 +125,7 @@ impl ReceiptManager {
     pub async fn get_receipt(
         &self,
         message_id: &MessageIdData,
-    ) -> Option<futures::channel::oneshot::Sender<CommandSendReceipt>> {
+    ) -> Option<futures::channel::oneshot::Sender<()>> {
         self.map.lock().await.remove(&message_id)
     }
 }
@@ -138,13 +149,27 @@ impl PulsarConnectionManager {
         let connection =
             PulsarConnection::connect(&self.config.endpoint_url, &self.config.endpoint_port).await;
         self.connection = Some(connection);
-        Ok(())
+
+        self.send(ClientCommands::Connect { auth_data: None }.into())
+            .await
+            .map_err(|_| PulsarConnectionError::Timeout)?;
+
+        let message = self
+            .recv()
+            .await
+            .map_err(|_| PulsarConnectionError::Timeout)?;
+
+        if let ServerMessage::Connected = message {
+            return Ok(());
+        } else {
+            return Err(PulsarConnectionError::UnsupportedCommand);
+        }
     }
 
-    pub async fn send(&self, base_command: BaseCommand) -> Result<(), PulsarConnectionError> {
+    pub async fn send(&self, message: Message) -> Result<(), PulsarConnectionError> {
         if let Some(connection) = &self.connection {
             return connection
-                .send(base_command)
+                .send(message)
                 .await
                 .map_err(|_| PulsarConnectionError::Disconnected)
                 .map(|_| ());
@@ -154,9 +179,9 @@ impl PulsarConnectionManager {
 
     pub async fn send_with_receipt(
         &self,
-        base_command: BaseCommand,
+        message: Message,
     ) -> Result<SendReceipt, PulsarConnectionError> {
-        if let Some(send_cmd) = base_command.send.clone().into_option() {
+        if let Some(send_cmd) = message.command.send.clone().into_option() {
             let message_id = send_cmd.message_id.clone().unwrap();
             let (send_receipt, receipt_handle) = SendReceipt::create_pair(&message_id);
 
@@ -166,7 +191,7 @@ impl PulsarConnectionManager {
 
             if let Some(connection) = &self.connection {
                 connection
-                    .send(base_command)
+                    .send(message)
                     .await
                     .map_err(|_| PulsarConnectionError::Disconnected)?;
             }
@@ -176,22 +201,32 @@ impl PulsarConnectionManager {
         panic!("Not a send command");
     }
 
-    pub async fn recv(&self) -> Result<pulsar::BaseCommand, PulsarConnectionError> {
+    pub async fn recv(&self) -> Result<ServerMessage, PulsarConnectionError> {
         if let Some(connection) = &self.connection {
-            return match connection.recv().await {
-                Ok(cmd) => {
-                    if let Some(send_receipt_cmd) = cmd.send_receipt.clone().into_option() {
-                        let message_id = send_receipt_cmd.message_id.clone().unwrap();
-                        let receipt_handle = self.receipt_manager.get_receipt(&message_id).await;
-                        if let Some(handle) = receipt_handle {
-                            let _ = handle.send(cmd.send_receipt.clone().unwrap());
-                        };
-                    }
-                    Ok(cmd)
+            let message: ServerMessage = connection
+                .recv()
+                .await
+                .map_err(|_| PulsarConnectionError::Disconnected)?
+                .try_into()
+                .map_err(|_| PulsarConnectionError::UnsupportedCommand)?;
+
+            match &message {
+                ServerMessage::SendReceipt { message_id } => {
+                    let receipt_handle = self.receipt_manager.get_receipt(&message_id).await;
+                    if let Some(handle) = receipt_handle {
+                        let _ = handle.send(());
+                    };
                 }
-                Err(_) => Err(PulsarConnectionError::Disconnected),
-            };
+                ServerMessage::Ping => {
+                    self.send(ClientCommands::Pong.into())
+                        .await
+                        .map_err(|_| PulsarConnectionError::Timeout)?;
+                }
+                _ => {}
+            }
+            Ok(message)
+        } else {
+            panic!("Not connected");
         }
-        panic!("Not connected");
     }
 }
