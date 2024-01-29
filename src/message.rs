@@ -32,33 +32,306 @@ pub struct Message {
     pub payload: Option<Payload>,
 }
 
+pub enum Outbound {
+    Connection(ConnectionOutbound),
+    Engine(EngineOutbound),
+    Client(ClientOutbound),
+}
+
+impl ToString for Outbound {
+    fn to_string(&self) -> String {
+        format!(
+            "-> {}",
+            match self {
+                Outbound::Connection(command) => format!("{:?}", command.base_command()),
+                Outbound::Engine(command) => format!("{:?}", command.base_command()),
+                Outbound::Client(command) => format!("{:?}", command.base_command()),
+            }
+        )
+    }
+}
+
+impl Into<Message> for Outbound {
+    fn into(self) -> Message {
+        match self {
+            Outbound::Connection(command) => command.into(),
+            Outbound::Engine(command) => command.into(),
+            Outbound::Client(command) => command.into(),
+        }
+    }
+}
+
+impl Outbound {
+    pub fn base_command(&self) -> proto::pulsar::base_command::Type {
+        match self {
+            Outbound::Connection(command) => command.base_command(),
+            Outbound::Engine(command) => command.base_command(),
+            Outbound::Client(command) => command.base_command(),
+        }
+    }
+}
+
+pub enum Inbound {
+    Connection(ConnectionInbound),
+    Engine(EngineInbound),
+    Client(ClientInbound),
+}
+
+impl ToString for Inbound {
+    fn to_string(&self) -> String {
+        format!(
+            "<- {}",
+            match self {
+                Inbound::Connection(command) => format!("{:?}", command.base_command()),
+                Inbound::Engine(command) => format!("{:?}", command.base_command()),
+                Inbound::Client(command) => format!("{:?}", command.base_command()),
+            }
+        )
+    }
+}
+
+impl TryFrom<&Message> for Inbound {
+    type Error = std::io::Error;
+    fn try_from(value: &Message) -> Result<Self, Self::Error> {
+        if let Ok(connection) = ConnectionInbound::try_from(value) {
+            return Ok(Inbound::Connection(connection));
+        } else if let Ok(engine) = EngineInbound::try_from(value) {
+            return Ok(Inbound::Engine(engine));
+        } else if let Ok(client) = ClientInbound::try_from(value) {
+            return Ok(Inbound::Client(client));
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Unsupported command",
+        ))
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub enum ClientCommand {
-    Send(Vec<u8>),
+pub enum ConnectionInbound {
+    Ping,
+}
+
+impl TryFrom<&Message> for ConnectionInbound {
+    type Error = std::io::Error;
+    fn try_from(message: &Message) -> Result<ConnectionInbound, Self::Error> {
+        match message.command.type_() {
+            proto::pulsar::base_command::Type::PING => Ok(ConnectionInbound::Ping),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Unsupported command",
+            )),
+        }
+    }
+}
+
+impl ConnectionInbound {
+    pub fn base_command(&self) -> proto::pulsar::base_command::Type {
+        match self {
+            ConnectionInbound::Ping => proto::pulsar::base_command::Type::PING,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum ConnectionOutbound {
+    Pong,
+}
+
+impl Into<Outbound> for ConnectionOutbound {
+    fn into(self) -> Outbound {
+        Outbound::Connection(self)
+    }
+}
+
+impl Into<Message> for ConnectionOutbound {
+    fn into(self) -> Message {
+        match self {
+            ConnectionOutbound::Pong => {
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.set_type(proto::pulsar::base_command::Type::PONG);
+                let pong = proto::pulsar::CommandPong::new();
+                base.pong = MessageField::some(pong);
+                Message {
+                    command: base,
+                    payload: None,
+                }
+            }
+        }
+    }
+}
+
+impl ConnectionOutbound {
+    pub fn base_command(&self) -> proto::pulsar::base_command::Type {
+        match self {
+            ConnectionOutbound::Pong => proto::pulsar::base_command::Type::PONG,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum EngineOutbound {
+    Connect { auth_data: Option<Vec<u8>> },
+}
+
+impl Into<Message> for EngineOutbound {
+    fn into(self) -> Message {
+        match self {
+            EngineOutbound::Connect { auth_data } => {
+                let mut connect = proto::pulsar::CommandConnect::new();
+                connect.set_client_version("0.0.1".to_string());
+                connect.set_protocol_version(21);
+
+                if let Some(v) = auth_data {
+                    connect.set_auth_method(proto::pulsar::AuthMethod::AuthMethodAthens);
+                    connect.set_auth_data(v.to_vec())
+                }
+
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.connect = MessageField::some(connect);
+                base.set_type(proto::pulsar::base_command::Type::CONNECT.into());
+                Message {
+                    command: base,
+                    payload: None,
+                }
+            }
+        }
+    }
+}
+
+impl Into<Outbound> for EngineOutbound {
+    fn into(self) -> Outbound {
+        Outbound::Engine(self)
+    }
+}
+
+impl EngineOutbound {
+    pub fn base_command(&self) -> proto::pulsar::base_command::Type {
+        match self {
+            EngineOutbound::Connect { .. } => proto::pulsar::base_command::Type::CONNECT,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum EngineInbound {
+    SendReceipt { message_id: MessageIdData },
+    Connected,
+    AuthChallenge,
+}
+
+impl Into<Inbound> for EngineInbound {
+    fn into(self) -> Inbound {
+        Inbound::Engine(self)
+    }
+}
+
+impl EngineInbound {
+    pub fn base_command(&self) -> proto::pulsar::base_command::Type {
+        match self {
+            EngineInbound::SendReceipt { .. } => proto::pulsar::base_command::Type::SEND_RECEIPT,
+            EngineInbound::Connected => proto::pulsar::base_command::Type::CONNECTED,
+            EngineInbound::AuthChallenge => proto::pulsar::base_command::Type::AUTH_CHALLENGE,
+        }
+    }
+}
+
+impl TryFrom<&Message> for EngineInbound {
+    type Error = std::io::Error;
+    fn try_from(message: &Message) -> Result<EngineInbound, Self::Error> {
+        match message.command.type_() {
+            proto::pulsar::base_command::Type::CONNECTED => Ok(EngineInbound::Connected),
+            proto::pulsar::base_command::Type::AUTH_CHALLENGE => Ok(EngineInbound::AuthChallenge),
+            proto::pulsar::base_command::Type::SEND_RECEIPT => {
+                let send = message.command.send.clone().unwrap();
+                let message_id = send.message_id.unwrap();
+                Ok(EngineInbound::SendReceipt { message_id })
+            }
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Unsupported command",
+            )),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum ClientInbound {
+    Message {
+        message_id: MessageIdData,
+        payload: Vec<u8>,
+    },
+}
+
+impl TryFrom<&Message> for ClientInbound {
+    type Error = std::io::Error;
+    fn try_from(message: &Message) -> Result<ClientInbound, Self::Error> {
+        match message.command.type_() {
+            proto::pulsar::base_command::Type::MESSAGE => {
+                let message_id = message.command.message.message_id.clone().unwrap();
+                let payload = message.payload.as_ref().unwrap().data.clone();
+                Ok(ClientInbound::Message {
+                    message_id,
+                    payload,
+                })
+            }
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Unsupported command",
+            )),
+        }
+    }
+}
+
+impl Into<Inbound> for ClientInbound {
+    fn into(self) -> Inbound {
+        Inbound::Client(self)
+    }
+}
+
+impl ClientInbound {
+    pub fn base_command(&self) -> proto::pulsar::base_command::Type {
+        match self {
+            ClientInbound::Message { .. } => proto::pulsar::base_command::Type::MESSAGE,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum ClientOutbound {
+    Send {
+        message_id: MessageIdData,
+        payload: Vec<u8>,
+    },
     Ack(Vec<MessageIdData>),
     Ping,
     Pong,
-    Connect { auth_data: Option<Vec<u8>> },
     CloseProducer,
     CloseConsumer,
     AuthChallenge(Vec<u8>),
 }
 
-impl Into<Message> for ClientCommand {
+impl Into<Message> for ClientOutbound {
     fn into(self) -> Message {
         let command = match &self {
-            ClientCommand::Send(_) => {
+            ClientOutbound::Send { message_id, .. } => {
                 let mut send = proto::pulsar::CommandSend::new();
                 send.set_producer_id(0);
                 send.set_sequence_id(0);
                 send.set_num_messages(1);
+                send.message_id = MessageField::some(message_id.clone());
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.send = MessageField::some(send);
                 base.set_type(proto::pulsar::base_command::Type::SEND.into());
                 base
             }
-            ClientCommand::Ack(message_ids) => {
+            ClientOutbound::Ack(message_ids) => {
                 let mut ack = proto::pulsar::CommandAck::new();
                 ack.set_consumer_id(0);
 
@@ -74,46 +347,31 @@ impl Into<Message> for ClientCommand {
                 base.set_type(proto::pulsar::base_command::Type::ACK.into());
                 base
             }
-            ClientCommand::Ping => {
+            ClientOutbound::Ping => {
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.set_type(proto::pulsar::base_command::Type::PING);
                 let ping = proto::pulsar::CommandPing::new();
                 base.ping = MessageField::some(ping);
                 base
             }
-            ClientCommand::Pong => {
+            ClientOutbound::Pong => {
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.set_type(proto::pulsar::base_command::Type::PONG);
                 let pong = proto::pulsar::CommandPong::new();
                 base.pong = MessageField::some(pong);
                 base
             }
-            ClientCommand::Connect { auth_data } => {
-                let mut connect = proto::pulsar::CommandConnect::new();
-                connect.set_client_version("0.0.1".to_string());
-                connect.set_protocol_version(21);
-
-                if let Some(v) = auth_data {
-                    connect.set_auth_method(proto::pulsar::AuthMethod::AuthMethodAthens);
-                    connect.set_auth_data(v.to_vec())
-                }
-
-                let mut base = proto::pulsar::BaseCommand::new();
-                base.connect = MessageField::some(connect);
-                base.set_type(proto::pulsar::base_command::Type::CONNECT.into());
-                base
-            }
-            ClientCommand::CloseProducer => {
+            ClientOutbound::CloseProducer => {
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.set_type(proto::pulsar::base_command::Type::CLOSE_PRODUCER.into());
                 base
             }
-            ClientCommand::CloseConsumer => {
+            ClientOutbound::CloseConsumer => {
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.set_type(proto::pulsar::base_command::Type::CLOSE_CONSUMER.into());
                 base
             }
-            ClientCommand::AuthChallenge(bytes) => {
+            ClientOutbound::AuthChallenge(bytes) => {
                 let mut auth_challenge = proto::pulsar::CommandAuthChallenge::new();
                 let mut auth_data = AuthData::new();
                 auth_data.set_auth_data(bytes.to_vec());
@@ -126,9 +384,9 @@ impl Into<Message> for ClientCommand {
         };
 
         let payload = match self {
-            ClientCommand::Send(bytes) => Some(Payload {
+            ClientOutbound::Send { payload, .. } => Some(Payload {
                 metadata: MessageMetadata::new(),
-                data: bytes,
+                data: payload,
             }),
             _ => None,
         };
@@ -137,65 +395,23 @@ impl Into<Message> for ClientCommand {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub enum ServerMessage {
-    SendReceipt {
-        message_id: MessageIdData,
-    },
-    Message {
-        message_id: MessageIdData,
-        payload: Vec<u8>,
-    },
-    Ping,
-    Connected,
-    AuthChallenge,
+impl ClientOutbound {
+    pub fn base_command(&self) -> proto::pulsar::base_command::Type {
+        match self {
+            ClientOutbound::Send { .. } => proto::pulsar::base_command::Type::SEND,
+            ClientOutbound::Ack(_) => proto::pulsar::base_command::Type::ACK,
+            ClientOutbound::Ping => proto::pulsar::base_command::Type::PING,
+            ClientOutbound::Pong => proto::pulsar::base_command::Type::PONG,
+            ClientOutbound::CloseProducer => proto::pulsar::base_command::Type::CLOSE_PRODUCER,
+            ClientOutbound::CloseConsumer => proto::pulsar::base_command::Type::CLOSE_CONSUMER,
+            ClientOutbound::AuthChallenge(_) => proto::pulsar::base_command::Type::AUTH_CHALLENGE,
+        }
+    }
 }
 
-impl TryFrom<Message> for ServerMessage {
-    type Error = std::io::Error;
-    fn try_from(message: Message) -> Result<ServerMessage, Self::Error> {
-        let command = message.command;
-        let _payload = message.payload;
-        match command.type_() {
-            //           proto::pulsar::base_command::Type::SEND_RECEIPT => {
-            //               let send_receipt =
-            //                   command
-            //                       .send_receipt
-            //                       .into_option()
-            //                       .ok_or(std::io::Error::new(
-            //                           std::io::ErrorKind::Other,
-            //                           "Missing send receipt",
-            //                       ))?;
-            //               let message_id =
-            //                   send_receipt
-            //                       .message_id
-            //                       .into_option()
-            //                       .ok_or(std::io::Error::new(
-            //                           std::io::ErrorKind::Other,
-            //                           "Missing message id",
-            //                       ))?;
-            //               Ok(ServerMessages::SendReceipt { message_id })
-            //           }
-            //           proto::pulsar::base_command::Type::MESSAGE => {
-            //               let message_id = command.message.unwrap().message_id.into_option().ok_or(
-            //                   std::io::Error::new(std::io::ErrorKind::Other, "Missing message id"),
-            //               )?;
-            //               let payload = payload.unwrap();
-            //               Ok(ServerMessages::Message {
-            //                   message_id,
-            //                   payload: payload.data,
-            //               })
-            //           }
-            //            proto::pulsar::base_command::Type::PONG => Ok(ServerMessages::Pong),
-            //            proto::pulsar::base_command::Type::AUTH_CHALLENGE => Ok(ServerMessages::AuthChallenge),
-            proto::pulsar::base_command::Type::CONNECTED => Ok(ServerMessage::Connected),
-            proto::pulsar::base_command::Type::PING => Ok(ServerMessage::Ping),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Unknown command type",
-            )),
-        }
+impl Into<Outbound> for ClientOutbound {
+    fn into(self) -> Outbound {
+        Outbound::Client(self)
     }
 }
 
