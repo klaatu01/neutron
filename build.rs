@@ -1,6 +1,6 @@
 fn main() {
     protobuf_codegen::Codegen::new()
-        .protoc()
+        .pure()
         .includes(&["src/protos"])
         .input("src/protos/pulsar.proto")
         .cargo_out_dir("protos")
