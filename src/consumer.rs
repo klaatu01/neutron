@@ -1,4 +1,4 @@
-use crate::message::ServerMessage;
+use crate::message::ClientInbound;
 use async_trait::async_trait;
 
 #[cfg(feature = "json")]
@@ -80,7 +80,9 @@ impl<T: TryFrom<Vec<u8>>> PulsarConsumerNext<T> for Consumer {
             let msg = self.client.next_message().await.map_err(|_| {
                 PulsarConsumerError::PulsarError("Failed to receive message".to_string())
             })?;
-            if let ServerMessage::Message {
+
+            #[allow(irrefutable_let_patterns)]
+            if let ClientInbound::Message {
                 message_id,
                 payload,
             } = msg
@@ -107,7 +109,7 @@ impl<T: DeserializeOwned> PulsarConsumerNext<T> for Consumer {
             let msg = self.client.next_message().await.map_err(|_| {
                 PulsarConsumerError::PulsarError("Failed to receive message".to_string())
             })?;
-            if let ServerMessage::Message {
+            if let ClientInbound::Message {
                 message_id,
                 payload,
             } = msg
