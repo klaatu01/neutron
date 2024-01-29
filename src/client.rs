@@ -1,8 +1,6 @@
 use crate::{
     connection,
-    message::{
-        proto::pulsar::MessageIdData, ClientInbound, ClientOutbound,
-    },
+    message::{proto::pulsar::MessageIdData, ClientInbound, ClientOutbound},
 };
 use async_trait::async_trait;
 
@@ -55,7 +53,7 @@ impl Pulsar {
         }
     }
 
-    pub async fn connect(&mut self) -> Result<(), PulsarClientError> {
+    pub(crate) async fn connect(&mut self) -> Result<(), PulsarClientError> {
         self.connection_manager
             .connect()
             .await
