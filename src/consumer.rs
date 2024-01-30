@@ -3,6 +3,7 @@ use crate::message::ClientInbound;
 use async_trait::async_trait;
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use std::fmt::{Display, Formatter};
 
 #[derive(Debug)]
@@ -118,6 +119,7 @@ impl<T: TryFrom<Vec<u8>>> PulsarConsumerNext<T> for Consumer {
             if let ClientInbound::Message {
                 message_id,
                 payload,
+                ..
             } = msg
             {
                 let payload = T::try_from(payload).map_err(|_| {

@@ -2,27 +2,27 @@ use std::collections::HashMap;
 
 use futures::lock::Mutex;
 
-use crate::message::{EngineInbound, Inbound};
+type Comparison<T> = Box<dyn Fn(&T) -> bool + Send + 'static>;
 
-enum Resolver {
-    Comparison(
-        Box<dyn Fn(&EngineInbound) -> bool>,
-        futures::channel::oneshot::Sender<()>,
-    ),
-    Basic(futures::channel::oneshot::Sender<()>),
+enum Resolver<T>
+where
+    T: Resolvable + Clone + Send + 'static,
+{
+    Comparison(Comparison<T>, futures::channel::oneshot::Sender<T>),
+    Basic(futures::channel::oneshot::Sender<T>),
 }
 
 pub type ResolverKey = String;
 
 pub trait Resolvable {
-    fn resolve_id(&self) -> Option<ResolverKey>;
+    fn resolver_id(&self) -> Option<ResolverKey>;
 }
 
-pub struct ResolverManager {
-    map: Mutex<HashMap<String, Resolver>>,
+pub struct ResolverManager<T: Resolvable + Clone + Send + 'static> {
+    map: Mutex<HashMap<String, Resolver<T>>>,
 }
 
-impl ResolverManager {
+impl<T: Resolvable + Clone + Send + 'static> ResolverManager<T> {
     pub fn new() -> Self {
         ResolverManager {
             map: Mutex::new(HashMap::new()),
@@ -31,53 +31,57 @@ impl ResolverManager {
 
     pub async fn put_resolver<K>(
         &self,
-        resolve: K,
-    ) -> Option<futures::channel::oneshot::Receiver<()>>
+        resolve: &K,
+    ) -> Option<futures::channel::oneshot::Receiver<T>>
     where
         K: Resolvable,
     {
-        let resolver_id = resolve.resolver_id();
-        let (tx, rx) = futures::channel::oneshot::channel();
-        self.map
-            .lock()
-            .await
-            .insert(resolver_id.to_string(), Resolver::Basic(tx));
-        rx
+        match resolve.resolver_id() {
+            Some(resolver_id) => {
+                let (tx, rx) = futures::channel::oneshot::channel();
+                self.map
+                    .lock()
+                    .await
+                    .insert(resolver_id.to_string(), Resolver::Basic(tx));
+                Some(rx)
+            }
+            None => None,
+        }
     }
 
-    pub async fn put_comparison_resolver<K, T>(
+    pub async fn put_comparison_resolver<K>(
         &self,
-        resolve: K,
-        comparison: T,
-    ) -> Option<futures::channel::oneshot::Receiver<()>>
+        resolve: &K,
+        comparison: Comparison<T>,
+    ) -> Option<futures::channel::oneshot::Receiver<T>>
     where
         K: Resolvable,
-        T: Fn(&Inbound) -> bool + 'static,
     {
-        let (tx, rx) = futures::channel::oneshot::channel();
-        let resolver_id = resolve.resolver_id();
-        self.map.lock().await.insert(
-            resolver_id.to_string(),
-            Resolver::Comparison(Box::new(comparison), tx),
-        );
-        rx
+        match resolve.resolver_id() {
+            Some(resolver_id) => {
+                let (tx, rx) = futures::channel::oneshot::channel();
+                self.map.lock().await.insert(
+                    resolver_id.to_string(),
+                    Resolver::Comparison(Box::new(comparison), tx),
+                );
+                Some(rx)
+            }
+            None => None,
+        }
     }
 
-    pub async fn get_receipt<K>(&self, resolve: K, engine_inbound: &EngineInbound)
-    where
-        K: Resolvable,
-    {
-        if let Some(resolver_id) = resolve.resolver_id() {
+    pub async fn get_receipt(&self, resolvable: &T) {
+        if let Some(resolver_id) = resolvable.resolver_id() {
             let mut map = self.map.lock().await;
-            let resolver = map.remove(resolver_id);
+            let resolver = map.remove(&resolver_id);
             match resolver {
                 Some(Resolver::Comparison(comparison, tx)) => {
-                    if comparison(engine_inbound) {
-                        let _ = tx.send(());
+                    if comparison(resolvable) {
+                        let _ = tx.send(resolvable.clone());
                     };
                 }
                 Some(Resolver::Basic(tx)) => {
-                    let _ = tx.send(());
+                    let _ = tx.send(resolvable.clone());
                 }
                 _ => (),
             }

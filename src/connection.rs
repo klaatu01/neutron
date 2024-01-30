@@ -1,4 +1,5 @@
-use futures::lock::Mutex;
+use futures::Future;
+use futures::{lock::Mutex, FutureExt};
 use std::collections::HashMap;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -10,7 +11,7 @@ use crate::{
         proto::pulsar::MessageIdData, ClientInbound, ClientOutbound, ConnectionInbound,
         ConnectionOutbound, EngineInbound, EngineOutbound, Inbound, Message, Outbound, SendReceipt,
     },
-    resolver_manager::ResolverManager,
+    resolver_manager::{Resolvable, ResolverManager},
     PulsarConfig,
 };
 
@@ -134,7 +135,7 @@ impl PulsarConnection {
 pub struct PulsarConnectionManager {
     config: PulsarConfig,
     connection: Option<PulsarConnection>,
-    resolver_manager: ResolverManager,
+    resolver_manager: ResolverManager<Inbound>,
 }
 
 impl PulsarConnectionManager {
@@ -152,16 +153,11 @@ impl PulsarConnectionManager {
         self.connection = Some(connection);
 
         let start = std::time::Instant::now();
-        self.send(EngineOutbound::Connect { auth_data: None }.into())
-            .await
-            .map_err(|_| PulsarConnectionError::Timeout)?;
+        let inbound = self
+            .send_and_resolve(EngineOutbound::Connect { auth_data: None }.into())
+            .await?;
 
-        let message = self
-            .next_inbound()
-            .await
-            .map_err(|_| PulsarConnectionError::Disconnected)?;
-
-        if let Inbound::Engine(EngineInbound::Connected) = message {
+        if let Inbound::Engine(EngineInbound::Connected) = inbound {
             println!("Connected in {}ms", start.elapsed().as_millis());
             return Ok(());
         } else {
@@ -180,22 +176,23 @@ impl PulsarConnectionManager {
         panic!("Not connected");
     }
 
-    pub async fn send_with_receipt(
+    pub async fn send_and_resolve(
         &self,
-        message: Outbound,
-    ) -> Result<SendReceipt, PulsarConnectionError> {
-        if let Outbound::Client(client_outbound) = &message {
-            let resolver = self.resolver_manager.put_resolver(put_resolver).await;
-            if let Some(connection) = &self.connection {
+        outbound: Outbound,
+    ) -> Result<Inbound, PulsarConnectionError> {
+        if let Some(connection) = &self.connection {
+            return if let Some(resolver) = self.resolver_manager.put_resolver(&outbound).await {
                 connection
-                    .send(message.into())
+                    .send(outbound.into())
                     .await
                     .map_err(|_| PulsarConnectionError::Disconnected)?;
-            }
-            let send_receipt = resolver.await.unwrap();
-            return Ok(send_receipt);
+                let inbound = resolver.await.map_err(|_| PulsarConnectionError::Timeout)?;
+                Ok(inbound)
+            } else {
+                Err(PulsarConnectionError::Timeout)
+            };
         }
-        panic!("Not a send command");
+        Err(PulsarConnectionError::Disconnected)
     }
 
     async fn handle_engine_inbound(
