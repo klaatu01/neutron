@@ -6,6 +6,8 @@ use nom::{
 };
 use protobuf::{Message as _, MessageField};
 
+use crate::resolver_manager::{Resolvable, ResolverKey};
+
 use self::proto::pulsar::{AuthData, BaseCommand, MessageIdData, MessageMetadata};
 
 pub mod proto {
@@ -216,12 +218,38 @@ impl EngineOutbound {
     }
 }
 
+impl Resolvable for EngineOutbound {
+    fn resolve_id(&self) -> Option<ResolverKey> {
+        match self {
+            EngineOutbound::Connect { .. } => Some("CONNECT".to_string()),
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum EngineInbound {
-    SendReceipt { message_id: MessageIdData },
+    SendReceipt {
+        producer_id: u64,
+        sequence_id: u64,
+        message_id: MessageIdData,
+    },
     Connected,
     AuthChallenge,
+}
+
+impl Resolvable for EngineInbound {
+    fn resolve_id(&self) -> Option<ResolverKey> {
+        match self {
+            EngineInbound::SendReceipt {
+                producer_id,
+                sequence_id,
+                ..
+            } => Some(format!("{producer_id}:{sequence_id}")),
+            EngineInbound::Connected => Some("CONNECT".to_string()),
+            _ => None,
+        }
+    }
 }
 
 impl Into<Inbound> for EngineInbound {
@@ -263,9 +291,23 @@ impl TryFrom<&Message> for EngineInbound {
 #[derive(Debug, Clone)]
 pub enum ClientInbound {
     Message {
+        producer_id: u64,
+        sequence_id: u64,
         message_id: MessageIdData,
         payload: Vec<u8>,
     },
+}
+
+impl Resolvable for ClientInbound {
+    fn resolve_id(&self) -> Option<ResolverKey> {
+        match self {
+            ClientInbound::Message {
+                producer_id,
+                sequence_id,
+                ..
+            } => Some(format!("{producer_id}:{sequence_id}")),
+        }
+    }
 }
 
 impl TryFrom<&Message> for ClientInbound {
@@ -306,6 +348,8 @@ impl ClientInbound {
 #[derive(Debug, Clone)]
 pub enum ClientOutbound {
     Send {
+        producer_id: u64,
+        sequence_id: u64,
         message_id: MessageIdData,
         payload: Vec<u8>,
     },
@@ -315,6 +359,19 @@ pub enum ClientOutbound {
     CloseProducer,
     CloseConsumer,
     AuthChallenge(Vec<u8>),
+}
+
+impl Resolvable for ClientOutbound {
+    fn resolve_id(&self) -> Option<ResolverKey> {
+        match self {
+            ClientOutbound::Send {
+                producer_id,
+                sequence_id,
+                ..
+            } => Some(format!("{producer_id}:{sequence_id}")),
+            _ => None,
+        }
+    }
 }
 
 impl Into<Message> for ClientOutbound {

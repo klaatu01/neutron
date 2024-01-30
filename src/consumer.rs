@@ -1,12 +1,9 @@
-use std::fmt::{Display, Formatter};
-
+use crate::message::proto::pulsar::MessageIdData;
 use crate::message::ClientInbound;
 use async_trait::async_trait;
-
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
-
-use crate::message::proto::pulsar::MessageIdData;
+use std::fmt::{Display, Formatter};
 
 #[derive(Debug)]
 pub enum PulsarConsumerError {
@@ -45,9 +42,10 @@ pub trait PulsarConsumerNext<T: DeserializeOwned> {
     async fn next(&self) -> Result<Message<T>, PulsarConsumerError>;
 }
 
+#[derive(Debug, Clone, Deserialize)]
 pub struct ConsumerConfig {
     pub consumer_name: String,
-    pub consumer_id: String,
+    pub consumer_id: u64,
     pub topic: String,
     pub subscription: String,
 }
@@ -68,7 +66,12 @@ impl Consumer {
             .connect()
             .await
             .map_err(|_| PulsarConsumerError::PulsarError("Failed to connect".to_string()))?;
+        // self.register().await?;
         Ok(self)
+    }
+
+    async fn register(&self) -> Result<(), PulsarConsumerError> {
+        unimplemented!();
     }
 }
 

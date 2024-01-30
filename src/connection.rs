@@ -10,6 +10,7 @@ use crate::{
         proto::pulsar::MessageIdData, ClientInbound, ClientOutbound, ConnectionInbound,
         ConnectionOutbound, EngineInbound, EngineOutbound, Inbound, Message, Outbound, SendReceipt,
     },
+    resolver_manager::ResolverManager,
     PulsarConfig,
 };
 
@@ -130,41 +131,10 @@ impl PulsarConnection {
     }
 }
 
-pub struct ReceiptManager {
-    map: Mutex<HashMap<MessageIdData, futures::channel::oneshot::Sender<()>>>,
-}
-
-impl ReceiptManager {
-    pub fn new() -> Self {
-        ReceiptManager {
-            map: Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub async fn put_receipt(
-        &self,
-        message_id: &MessageIdData,
-        tx: futures::channel::oneshot::Sender<()>,
-    ) {
-        self.map
-            .lock()
-            .await
-            .insert(message_id.clone(), tx)
-            .unwrap();
-    }
-
-    pub async fn get_receipt(
-        &self,
-        message_id: &MessageIdData,
-    ) -> Option<futures::channel::oneshot::Sender<()>> {
-        self.map.lock().await.remove(&message_id)
-    }
-}
-
 pub struct PulsarConnectionManager {
     config: PulsarConfig,
     connection: Option<PulsarConnection>,
-    receipt_manager: ReceiptManager,
+    resolver_manager: ResolverManager,
 }
 
 impl PulsarConnectionManager {
@@ -172,7 +142,7 @@ impl PulsarConnectionManager {
         PulsarConnectionManager {
             config: config.clone(),
             connection: None,
-            receipt_manager: ReceiptManager::new(),
+            resolver_manager: ResolverManager::new(),
         }
     }
 
@@ -214,20 +184,15 @@ impl PulsarConnectionManager {
         &self,
         message: Outbound,
     ) -> Result<SendReceipt, PulsarConnectionError> {
-        if let Outbound::Client(ClientOutbound::Send { message_id, .. }) = &message {
-            let (send_receipt, receipt_handle) = SendReceipt::create_pair(&message_id);
-
-            self.receipt_manager
-                .put_receipt(&message_id, receipt_handle)
-                .await;
-
+        if let Outbound::Client(client_outbound) = &message {
+            let resolver = self.resolver_manager.put_resolver(put_resolver).await;
             if let Some(connection) = &self.connection {
                 connection
                     .send(message.into())
                     .await
                     .map_err(|_| PulsarConnectionError::Disconnected)?;
             }
-
+            let send_receipt = resolver.await.unwrap();
             return Ok(send_receipt);
         }
         panic!("Not a send command");
@@ -238,12 +203,6 @@ impl PulsarConnectionManager {
         message: EngineInbound,
     ) -> Result<(), PulsarConnectionError> {
         match message {
-            EngineInbound::SendReceipt { message_id } => {
-                let receipt_handle = self.receipt_manager.get_receipt(&message_id).await;
-                if let Some(handle) = receipt_handle {
-                    let _ = handle.send(());
-                };
-            }
             _ => {}
         }
         Ok(())

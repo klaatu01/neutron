@@ -4,9 +4,9 @@ mod connection;
 mod consumer;
 mod message;
 mod producer;
+mod resolver_manager;
 
 pub use auth::*;
 pub use client::*;
-pub use connection::*;
 pub use consumer::*;
 pub use producer::*;
