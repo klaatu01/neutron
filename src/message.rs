@@ -6,6 +6,8 @@ use nom::{
 };
 use protobuf::{Message as _, MessageField};
 
+use crate::resolver_manager::{Resolvable, ResolverKey};
+
 use self::proto::pulsar::{AuthData, BaseCommand, MessageIdData, MessageMetadata};
 
 pub mod proto {
@@ -32,10 +34,21 @@ pub struct Message {
     pub payload: Option<Payload>,
 }
 
+#[derive(Debug, Clone)]
 pub enum Outbound {
     Connection(ConnectionOutbound),
     Engine(EngineOutbound),
     Client(ClientOutbound),
+}
+
+impl Resolvable for Outbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            Outbound::Engine(command) => command.resolver_id(),
+            Outbound::Client(command) => command.resolver_id(),
+            _ => None,
+        }
+    }
 }
 
 impl ToString for Outbound {
@@ -71,10 +84,21 @@ impl Outbound {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum Inbound {
     Connection(ConnectionInbound),
     Engine(EngineInbound),
     Client(ClientInbound),
+}
+
+impl Resolvable for Inbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            Inbound::Engine(command) => command.resolver_id(),
+            Inbound::Client(command) => command.resolver_id(),
+            _ => None,
+        }
+    }
 }
 
 impl ToString for Inbound {
@@ -216,12 +240,38 @@ impl EngineOutbound {
     }
 }
 
+impl Resolvable for EngineOutbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            EngineOutbound::Connect { .. } => Some("CONNECT".to_string()),
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum EngineInbound {
-    SendReceipt { message_id: MessageIdData },
+    SendReceipt {
+        producer_id: u64,
+        sequence_id: u64,
+        message_id: MessageIdData,
+    },
     Connected,
     AuthChallenge,
+}
+
+impl Resolvable for EngineInbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            EngineInbound::SendReceipt {
+                producer_id,
+                sequence_id,
+                ..
+            } => Some(format!("{producer_id}:{sequence_id}")),
+            EngineInbound::Connected => Some("CONNECT".to_string()),
+            _ => None,
+        }
+    }
 }
 
 impl Into<Inbound> for EngineInbound {
@@ -247,9 +297,15 @@ impl TryFrom<&Message> for EngineInbound {
             proto::pulsar::base_command::Type::CONNECTED => Ok(EngineInbound::Connected),
             proto::pulsar::base_command::Type::AUTH_CHALLENGE => Ok(EngineInbound::AuthChallenge),
             proto::pulsar::base_command::Type::SEND_RECEIPT => {
-                let send = message.command.send.clone().unwrap();
-                let message_id = send.message_id.unwrap();
-                Ok(EngineInbound::SendReceipt { message_id })
+                let send = &message.command.send;
+                let producer_id = send.producer_id();
+                let sequence_id = send.sequence_id();
+                let message_id = send.message_id.clone().unwrap();
+                Ok(EngineInbound::SendReceipt {
+                    message_id,
+                    producer_id,
+                    sequence_id,
+                })
             }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -263,9 +319,23 @@ impl TryFrom<&Message> for EngineInbound {
 #[derive(Debug, Clone)]
 pub enum ClientInbound {
     Message {
+        producer_id: u64,
+        sequence_id: u64,
         message_id: MessageIdData,
         payload: Vec<u8>,
     },
+}
+
+impl Resolvable for ClientInbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            ClientInbound::Message {
+                producer_id,
+                sequence_id,
+                ..
+            } => Some(format!("{producer_id}:{sequence_id}")),
+        }
+    }
 }
 
 impl TryFrom<&Message> for ClientInbound {
@@ -275,9 +345,12 @@ impl TryFrom<&Message> for ClientInbound {
             proto::pulsar::base_command::Type::MESSAGE => {
                 let message_id = message.command.message.message_id.clone().unwrap();
                 let payload = message.payload.as_ref().unwrap().data.clone();
+                let producer_id = message.command.message.consumer_id();
                 Ok(ClientInbound::Message {
                     message_id,
                     payload,
+                    producer_id,
+                    sequence_id: 0,
                 })
             }
             _ => Err(std::io::Error::new(
@@ -306,6 +379,8 @@ impl ClientInbound {
 #[derive(Debug, Clone)]
 pub enum ClientOutbound {
     Send {
+        producer_id: u64,
+        sequence_id: u64,
         message_id: MessageIdData,
         payload: Vec<u8>,
     },
@@ -317,13 +392,31 @@ pub enum ClientOutbound {
     AuthChallenge(Vec<u8>),
 }
 
+impl Resolvable for ClientOutbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            ClientOutbound::Send {
+                producer_id,
+                sequence_id,
+                ..
+            } => Some(format!("{producer_id}:{sequence_id}")),
+            _ => None,
+        }
+    }
+}
+
 impl Into<Message> for ClientOutbound {
     fn into(self) -> Message {
         let command = match &self {
-            ClientOutbound::Send { message_id, .. } => {
+            ClientOutbound::Send {
+                message_id,
+                producer_id,
+                sequence_id,
+                ..
+            } => {
                 let mut send = proto::pulsar::CommandSend::new();
-                send.set_producer_id(0);
-                send.set_sequence_id(0);
+                send.set_producer_id(*producer_id);
+                send.set_sequence_id(*sequence_id);
                 send.set_num_messages(1);
                 send.message_id = MessageField::some(message_id.clone());
                 let mut base = proto::pulsar::BaseCommand::new();

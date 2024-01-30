@@ -70,11 +70,18 @@ impl Pulsar {
         unimplemented!();
     }
 
-    pub(crate) async fn send_message(&self, payload: Vec<u8>) -> Result<(), PulsarClientError> {
+    pub(crate) async fn send_message(
+        &self,
+        producer_id: u64,
+        sequence_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<(), PulsarClientError> {
         let message_id = self.next_message_id();
         let message = ClientOutbound::Send {
             message_id,
             payload,
+            producer_id,
+            sequence_id,
         };
         self.connection_manager
             .send(message.into())

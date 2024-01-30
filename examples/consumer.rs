@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let consumer_config = neutron::ConsumerConfig {
-        consumer_id: "test".to_string(),
+        consumer_id: 0,
         topic: "test".to_string(),
         subscription: "test".to_string(),
         consumer_name: "test".to_string(),
