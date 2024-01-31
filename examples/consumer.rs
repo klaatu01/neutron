@@ -1,5 +1,3 @@
-use neutron::{Message, PulsarConsumerNext};
-
 #[derive(Debug)]
 #[allow(dead_code)]
 struct Data {
@@ -20,6 +18,7 @@ impl TryFrom<Vec<u8>> for Data {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
     let pulsar_config = neutron::PulsarConfig {
         endpoint_url: "127.0.0.1".to_string(),
         endpoint_port: 6650,
@@ -32,10 +31,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         consumer_name: "test".to_string(),
     };
 
-    let client = neutron::Pulsar::new(pulsar_config);
-    let consumer = neutron::Consumer::new(client, consumer_config)
+    let consumer = neutron::Consumer::new(pulsar_config, consumer_config)
         .connect()
         .await?;
-    let _: Message<Data> = consumer.next().await?;
+
+    consumer.next().await?;
     Ok(())
 }

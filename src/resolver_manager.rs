@@ -70,7 +70,7 @@ impl<T: Resolvable + Clone + Send + 'static> ResolverManager<T> {
         }
     }
 
-    pub async fn get_receipt(&self, resolvable: &T) {
+    pub async fn try_resolve(&self, resolvable: &T) {
         if let Some(resolver_id) = resolvable.resolver_id() {
             let mut map = self.map.lock().await;
             let resolver = map.remove(&resolver_id);
