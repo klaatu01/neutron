@@ -33,7 +33,7 @@ impl Consumer {
         }
     }
 
-    pub async fn connect(mut self) -> Result<Self, NeutronError> {
+    pub async fn connect(self) -> Result<Self, NeutronError> {
         let client_engine_connection = crate::Pulsar::new(self.pulsar_config.clone()).run().await;
         Ok(Consumer {
             config: self.config,

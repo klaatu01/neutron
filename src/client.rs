@@ -44,7 +44,7 @@ impl Pulsar {
     pub async fn handle_connection_inbound(
         &self,
         client_connection: &EngineConnection<Inbound, Outbound>,
-        engine_connection: &EngineConnection<Outbound, Inbound>,
+        _engine_connection: &EngineConnection<Outbound, Inbound>,
         inbound: &ResultInbound,
     ) -> Result<(), NeutronError> {
         match inbound {
@@ -62,18 +62,18 @@ impl Pulsar {
 
     pub async fn handle_connection_outbound(
         &self,
-        outbound: &ResultOutbound,
+        _outbound: &ResultOutbound,
     ) -> Result<(), NeutronError> {
         Ok(())
     }
 
-    pub async fn handle_client_inbound(&self, inbound: &ResultInbound) -> Result<(), NeutronError> {
+    pub async fn handle_client_inbound(&self, _inbound: &ResultInbound) -> Result<(), NeutronError> {
         Ok(())
     }
 
     pub async fn handle_client_outbound(
         &self,
-        outbound: &ResultOutbound,
+        _outbound: &ResultOutbound,
     ) -> Result<(), NeutronError> {
         Ok(())
     }

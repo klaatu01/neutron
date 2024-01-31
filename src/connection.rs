@@ -1,49 +1,15 @@
-use futures::Future;
-use futures::{lock::Mutex, FutureExt};
-use std::collections::HashMap;
-use std::f32::consts::E;
-use std::sync::Arc;
+use crate::engine::{Engine, EngineConnection};
+use crate::error::NeutronError;
+use crate::message::{Inbound, Message, Outbound};
+use async_trait::async_trait;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
-use crate::engine::{Engine, EngineConnection};
-use crate::error::NeutronError;
-use crate::{
-    message::{
-        proto::pulsar::MessageIdData, ClientInbound, ClientOutbound, ConnectionInbound,
-        ConnectionOutbound, EngineInbound, EngineOutbound, Inbound, Message, Outbound, SendReceipt,
-    },
-    resolver_manager::{Resolvable, ResolverManager},
-    PulsarConfig,
-};
-use async_trait::async_trait;
-
-#[derive(Debug, Clone)]
-pub enum PulsarConnectionError {
-    Disconnected,
-    Timeout,
-    UnsupportedCommand,
-    Decode,
-}
-
-impl std::fmt::Display for PulsarConnectionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            PulsarConnectionError::Disconnected => write!(f, "Disconnected"),
-            PulsarConnectionError::Timeout => write!(f, "Timeout"),
-            PulsarConnectionError::UnsupportedCommand => write!(f, "Unsupported command"),
-            PulsarConnectionError::Decode => write!(f, "Decode error"),
-        }
-    }
-}
-
 type ResultInbound = Result<Inbound, NeutronError>;
 type ResultOutbound = Result<Outbound, NeutronError>;
-
-impl std::error::Error for PulsarConnectionError {}
 
 pub struct PulsarConnection {
     sink: WriteHalf<TcpStream>,
@@ -79,7 +45,7 @@ impl PulsarConnection {
                                 .write_all(&bytes).await;
                         }
                         Err(e) => {
-                            log::warn!("Error: {}", &e);
+                            log::warn!("{}", e);
                         }
                     }
                 },
