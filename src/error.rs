@@ -6,6 +6,7 @@ pub enum NeutronError {
     DecodeFailed,
     EncodeFailed,
     ChannelTerminated,
+    Unresolvable,
 }
 
 impl NeutronError {
@@ -27,6 +28,7 @@ impl std::fmt::Display for NeutronError {
             NeutronError::DecodeFailed => write!(f, "Decode failed"),
             NeutronError::EncodeFailed => write!(f, "Encode failed"),
             NeutronError::ChannelTerminated => write!(f, "Channel terminated"),
+            NeutronError::Unresolvable => write!(f, "Unresolvable"),
         }
     }
 }

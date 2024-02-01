@@ -1,9 +1,10 @@
 use crate::connection::PulsarConnection;
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
-use crate::message::{Inbound, Outbound};
+use crate::message::{ConnectionInbound, ConnectionOutbound, EngineOutbound, Inbound, Outbound};
 use crate::resolver_manager::ResolverManager;
 use async_trait::async_trait;
+use futures::lock::Mutex;
 
 #[derive(Clone)]
 pub struct PulsarConfig {
@@ -17,7 +18,7 @@ pub struct Pulsar {
     pub(crate) connection_engine: Option<EngineConnection<Outbound, Inbound>>,
     pub(crate) resolver_manager: ResolverManager<Inbound>,
     pub(crate) client_connection: Option<EngineConnection<Inbound, Outbound>>,
-    pub(crate) inbound_buffer: Vec<Inbound>,
+    pub(crate) inbound_buffer: Mutex<Vec<Inbound>>,
 }
 
 type ResultInbound = Result<Inbound, NeutronError>;
@@ -37,7 +38,48 @@ impl Pulsar {
             connection_engine: None,
             resolver_manager: ResolverManager::new(),
             client_connection: None,
-            inbound_buffer: Vec::new(),
+            inbound_buffer: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub async fn send_and_resolve(
+        &self,
+        engine_connection: &EngineConnection<Outbound, Inbound>,
+        outbound: &ResultOutbound,
+    ) -> ResultInbound {
+        match outbound {
+            Ok(outbound) => match self.resolver_manager.put_resolver(outbound).await {
+                Some(resolver) => {
+                    engine_connection
+                        .send(Ok(outbound.clone()))
+                        .await
+                        .map_err(|_| NeutronError::ChannelTerminated)?;
+
+                    loop {
+                        tokio::select! {
+                            inbound = engine_connection.recv() => {
+                                match inbound {
+                                    Ok(inbound) => {
+                                        if self.resolver_manager.try_resolve(&inbound).await {
+                                            return Ok(inbound);
+                                        } else {
+                                            self.inbound_buffer.lock().await.push(inbound);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        return Err(e)
+                                    }
+                                }
+                            }
+                            inbound = resolver.recv() => {
+                                return inbound.map_err(|_| NeutronError::OperationTimeout);
+                            }
+                        }
+                    }
+                }
+                _ => Err(NeutronError::Unresolvable),
+            },
+            Err(e) => Err(e.clone()),
         }
     }
 
@@ -48,15 +90,25 @@ impl Pulsar {
         inbound: &ResultInbound,
     ) -> Result<(), NeutronError> {
         match inbound {
-            Err(NeutronError::Disconnected) => {
-                client_connection
-                    .send(Err(NeutronError::Disconnected))
-                    .await
-                    .unwrap();
-            }
-            _ => (),
+            Ok(inbound_cmd) => match inbound_cmd {
+                Inbound::Connection(ConnectionInbound::Ping) => {
+                    _engine_connection
+                        .send(Ok(Outbound::Connection(ConnectionOutbound::Pong)))
+                        .await
+                        .unwrap();
+                }
+                _ => (),
+            },
+            Err(inbound_err) => match inbound_err {
+                NeutronError::Disconnected => {
+                    client_connection
+                        .send(Err(NeutronError::Disconnected))
+                        .await
+                        .unwrap();
+                }
+                _ => (),
+            },
         }
-
         Ok(())
     }
 
@@ -67,7 +119,10 @@ impl Pulsar {
         Ok(())
     }
 
-    pub async fn handle_client_inbound(&self, _inbound: &ResultInbound) -> Result<(), NeutronError> {
+    pub async fn handle_client_inbound(
+        &self,
+        _inbound: &ResultInbound,
+    ) -> Result<(), NeutronError> {
         Ok(())
     }
 
@@ -84,12 +139,30 @@ impl Pulsar {
                 .await
                 .run()
                 .await;
+        let _ = self
+            .send_and_resolve(
+                &connection_engine,
+                &Ok(Outbound::Engine(crate::message::EngineOutbound::Connect {
+                    auth_data: None,
+                })),
+            )
+            .await;
         Ok(connection_engine)
     }
 
     pub async fn next(&self) -> bool {
         match (&self.client_connection, &self.connection_engine) {
             (Some(client_connection), Some(connection_engine)) => {
+                if let Some(inbound) = self.inbound_buffer.lock().await.pop() {
+                    self.handle_connection_inbound(
+                        &client_connection,
+                        &connection_engine,
+                        &Ok(inbound),
+                    )
+                    .await
+                    .unwrap();
+                    return false;
+                }
                 tokio::select! {
                     outbound = client_connection.recv() => {
                         if is_disconnect(&outbound) {
@@ -119,7 +192,6 @@ impl Pulsar {
 
     async fn start_pulsar(&mut self, client_connection: EngineConnection<Inbound, Outbound>) {
         self.client_connection = Some(client_connection);
-
         let inbound = self.connect().await;
         match inbound {
             Ok(inbound) => {

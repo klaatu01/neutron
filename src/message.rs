@@ -46,7 +46,7 @@ impl Resolvable for Outbound {
         match self {
             Outbound::Engine(command) => command.resolver_id(),
             Outbound::Client(command) => command.resolver_id(),
-            _ => None,
+            Outbound::Connection(command) => command.resolver_id(),
         }
     }
 }
@@ -96,7 +96,7 @@ impl Resolvable for Inbound {
         match self {
             Inbound::Engine(command) => command.resolver_id(),
             Inbound::Client(command) => command.resolver_id(),
-            _ => None,
+            Inbound::Connection(command) => command.resolver_id(),
         }
     }
 }
@@ -135,6 +135,7 @@ impl TryFrom<&Message> for Inbound {
 #[derive(Debug, Clone)]
 pub enum ConnectionInbound {
     Ping,
+    Pong,
 }
 
 impl TryFrom<&Message> for ConnectionInbound {
@@ -142,6 +143,7 @@ impl TryFrom<&Message> for ConnectionInbound {
     fn try_from(message: &Message) -> Result<ConnectionInbound, Self::Error> {
         match message.command.type_() {
             proto::pulsar::base_command::Type::PING => Ok(ConnectionInbound::Ping),
+            proto::pulsar::base_command::Type::PONG => Ok(ConnectionInbound::Pong),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Unsupported command",
@@ -154,6 +156,16 @@ impl ConnectionInbound {
     pub fn base_command(&self) -> proto::pulsar::base_command::Type {
         match self {
             ConnectionInbound::Ping => proto::pulsar::base_command::Type::PING,
+            ConnectionInbound::Pong => proto::pulsar::base_command::Type::PONG,
+        }
+    }
+}
+
+impl Resolvable for ConnectionInbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            ConnectionInbound::Pong => Some("PINGPONG".to_string()),
+            _ => None,
         }
     }
 }
@@ -162,6 +174,7 @@ impl ConnectionInbound {
 #[derive(Debug, Clone)]
 pub enum ConnectionOutbound {
     Pong,
+    Ping,
 }
 
 impl Into<Outbound> for ConnectionOutbound {
@@ -183,6 +196,16 @@ impl Into<Message> for ConnectionOutbound {
                     payload: None,
                 }
             }
+            ConnectionOutbound::Ping => {
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.set_type(proto::pulsar::base_command::Type::PING);
+                let ping = proto::pulsar::CommandPing::new();
+                base.ping = MessageField::some(ping);
+                Message {
+                    command: base,
+                    payload: None,
+                }
+            }
         }
     }
 }
@@ -191,6 +214,16 @@ impl ConnectionOutbound {
     pub fn base_command(&self) -> proto::pulsar::base_command::Type {
         match self {
             ConnectionOutbound::Pong => proto::pulsar::base_command::Type::PONG,
+            ConnectionOutbound::Ping => proto::pulsar::base_command::Type::PING,
+        }
+    }
+}
+
+impl Resolvable for ConnectionOutbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            ConnectionOutbound::Ping => Some("PINGPONG".to_string()),
+            _ => None,
         }
     }
 }
@@ -639,31 +672,6 @@ pub struct Payload {
     pub metadata: MessageMetadata,
     /// raw message data
     pub data: Vec<u8>,
-}
-
-pub struct SendReceipt {
-    pub message_id: MessageIdData,
-    pub rx: futures::channel::oneshot::Receiver<()>,
-}
-
-impl SendReceipt {
-    pub fn create_pair(
-        message_id: &MessageIdData,
-    ) -> (Self, futures::channel::oneshot::Sender<()>) {
-        let (tx, rx) = futures::channel::oneshot::channel();
-        (
-            Self {
-                message_id: message_id.clone(),
-                rx,
-            },
-            tx,
-        )
-    }
-
-    // TODO: This should be a Result of valid error types
-    pub async fn wait_for_receipt(self) -> Result<(), ()> {
-        Ok(self.rx.await.unwrap())
-    }
 }
 
 #[cfg(test)]

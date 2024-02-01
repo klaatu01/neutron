@@ -38,6 +38,7 @@ impl PulsarConnection {
                 outbound = client_connection.recv() => {
                     match outbound {
                         Ok(outbound) => {
+                            log::debug!("{}", outbound.to_string());
                             let msg: Message = outbound.into();
                             let bytes: Vec<u8> = msg.into();
                             let _ = self
