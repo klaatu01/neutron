@@ -38,7 +38,7 @@ impl PulsarConnection {
                 outbound = client_connection.recv() => {
                     match outbound {
                         Ok(outbound) => {
-                            log::debug!("{}", outbound.to_string());
+                            log::debug!("-> {:?}", outbound);
                             let msg: Message = outbound.into();
                             let bytes: Vec<u8> = msg.into();
                             let _ = self
@@ -74,7 +74,7 @@ impl PulsarConnection {
 
                     match &inbound {
                         Ok(inbound) => {
-                            log::debug!("{}", inbound.to_string());
+                            log::debug!("<- {:?}", inbound);
                         }
                         Err(NeutronError::Disconnected) => {
                             log::warn!("Disconnected");

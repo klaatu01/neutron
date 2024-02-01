@@ -357,6 +357,16 @@ pub enum ClientInbound {
         message_id: MessageIdData,
         payload: Vec<u8>,
     },
+    LookupTopic {
+        request_id: u64,
+        broker_service_url: String,
+        broker_service_url_tls: String,
+        response: proto::pulsar::command_lookup_topic_response::LookupType,
+        authoritative: bool,
+    },
+    Success {
+        request_id: u64,
+    },
 }
 
 impl Resolvable for ClientInbound {
@@ -367,6 +377,8 @@ impl Resolvable for ClientInbound {
                 sequence_id,
                 ..
             } => Some(format!("{producer_id}:{sequence_id}")),
+            ClientInbound::LookupTopic { request_id, .. } => Some(format!("LOOKUP:{request_id}")),
+            ClientInbound::Success { request_id } => Some(format!("SUCCESS:{request_id}")),
         }
     }
 }
@@ -386,6 +398,26 @@ impl TryFrom<&Message> for ClientInbound {
                     sequence_id: 0,
                 })
             }
+            proto::pulsar::base_command::Type::LOOKUP_RESPONSE => {
+                let lookup_topic = &message.command.lookupTopicResponse;
+                let request_id = lookup_topic.request_id();
+                let broker_service_url = lookup_topic.brokerServiceUrl().to_string();
+                let broker_service_url_tls = lookup_topic.brokerServiceUrlTls().to_string();
+                let response = lookup_topic.response();
+                let authoritative = lookup_topic.authoritative();
+                Ok(ClientInbound::LookupTopic {
+                    request_id,
+                    broker_service_url,
+                    broker_service_url_tls,
+                    response,
+                    authoritative,
+                })
+            }
+            proto::pulsar::base_command::Type::SUCCESS => {
+                let success = &message.command.success;
+                let request_id = success.request_id();
+                Ok(ClientInbound::Success { request_id })
+            }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Unsupported command",
@@ -404,6 +436,8 @@ impl ClientInbound {
     pub fn base_command(&self) -> proto::pulsar::base_command::Type {
         match self {
             ClientInbound::Message { .. } => proto::pulsar::base_command::Type::MESSAGE,
+            ClientInbound::LookupTopic { .. } => proto::pulsar::base_command::Type::LOOKUP_RESPONSE,
+            ClientInbound::Success { .. } => proto::pulsar::base_command::Type::SUCCESS,
         }
     }
 }
@@ -423,6 +457,21 @@ pub enum ClientOutbound {
     CloseProducer,
     CloseConsumer,
     AuthChallenge(Vec<u8>),
+    LookupTopic {
+        topic: String,
+        request_id: u64,
+    },
+    Subscribe {
+        topic: String,
+        subscription: String,
+        consumer_id: u64,
+        request_id: u64,
+        sub_type: proto::pulsar::command_subscribe::SubType,
+    },
+    Flow {
+        consumer_id: u64,
+        message_permits: u32,
+    },
 }
 
 impl Resolvable for ClientOutbound {
@@ -433,6 +482,8 @@ impl Resolvable for ClientOutbound {
                 sequence_id,
                 ..
             } => Some(format!("{producer_id}:{sequence_id}")),
+            ClientOutbound::LookupTopic { request_id, .. } => Some(format!("LOOKUP:{request_id}")),
+            ClientOutbound::Subscribe { request_id, .. } => Some(format!("SUCCESS:{request_id}")),
             _ => None,
         }
     }
@@ -507,6 +558,46 @@ impl Into<Message> for ClientOutbound {
                 base.set_type(proto::pulsar::base_command::Type::AUTH_CHALLENGE.into());
                 base
             }
+            ClientOutbound::LookupTopic { topic, request_id } => {
+                let mut lookup_topic = proto::pulsar::CommandLookupTopic::new();
+                lookup_topic.set_topic(topic.to_string());
+                lookup_topic.set_request_id(*request_id);
+                lookup_topic.set_authoritative(false);
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.lookupTopic = MessageField::some(lookup_topic);
+                base.set_type(proto::pulsar::base_command::Type::LOOKUP.into());
+                base
+            }
+            ClientOutbound::Subscribe {
+                topic,
+                subscription,
+                consumer_id,
+                request_id,
+                sub_type,
+            } => {
+                let mut subscribe = proto::pulsar::CommandSubscribe::new();
+                subscribe.set_topic(topic.to_string());
+                subscribe.set_subscription(subscription.to_string());
+                subscribe.set_consumer_id(*consumer_id);
+                subscribe.set_request_id(*request_id);
+                subscribe.set_subType(*sub_type);
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.subscribe = MessageField::some(subscribe);
+                base.set_type(proto::pulsar::base_command::Type::SUBSCRIBE.into());
+                base
+            }
+            ClientOutbound::Flow {
+                consumer_id,
+                message_permits,
+            } => {
+                let mut flow = proto::pulsar::CommandFlow::new();
+                flow.set_consumer_id(*consumer_id);
+                flow.set_messagePermits(*message_permits);
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.flow = MessageField::some(flow);
+                base.set_type(proto::pulsar::base_command::Type::FLOW.into());
+                base
+            }
         };
 
         let payload = match self {
@@ -531,6 +622,9 @@ impl ClientOutbound {
             ClientOutbound::CloseProducer => proto::pulsar::base_command::Type::CLOSE_PRODUCER,
             ClientOutbound::CloseConsumer => proto::pulsar::base_command::Type::CLOSE_CONSUMER,
             ClientOutbound::AuthChallenge(_) => proto::pulsar::base_command::Type::AUTH_CHALLENGE,
+            ClientOutbound::LookupTopic { .. } => proto::pulsar::base_command::Type::LOOKUP,
+            ClientOutbound::Subscribe { .. } => proto::pulsar::base_command::Type::SUBSCRIBE,
+            ClientOutbound::Flow { .. } => proto::pulsar::base_command::Type::FLOW,
         }
     }
 }

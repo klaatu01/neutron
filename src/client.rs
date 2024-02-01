@@ -15,7 +15,7 @@ pub struct PulsarConfig {
 pub struct Pulsar {
     #[allow(dead_code)]
     pub(crate) config: PulsarConfig,
-    pub(crate) connection_engine: Option<EngineConnection<Outbound, Inbound>>,
+    pub(crate) socket_connection: Option<EngineConnection<Outbound, Inbound>>,
     pub(crate) resolver_manager: ResolverManager<Inbound>,
     pub(crate) client_connection: Option<EngineConnection<Inbound, Outbound>>,
     pub(crate) inbound_buffer: Mutex<Vec<Inbound>>,
@@ -35,7 +35,7 @@ impl Pulsar {
     pub fn new(config: PulsarConfig) -> Self {
         Self {
             config,
-            connection_engine: None,
+            socket_connection: None,
             resolver_manager: ResolverManager::new(),
             client_connection: None,
             inbound_buffer: Mutex::new(Vec::new()),
@@ -44,20 +44,20 @@ impl Pulsar {
 
     pub async fn send_and_resolve(
         &self,
-        engine_connection: &EngineConnection<Outbound, Inbound>,
+        socket_connection: &EngineConnection<Outbound, Inbound>,
         outbound: &ResultOutbound,
     ) -> ResultInbound {
         match outbound {
             Ok(outbound) => match self.resolver_manager.put_resolver(outbound).await {
                 Some(resolver) => {
-                    engine_connection
+                    socket_connection
                         .send(Ok(outbound.clone()))
                         .await
                         .map_err(|_| NeutronError::ChannelTerminated)?;
 
                     loop {
                         tokio::select! {
-                            inbound = engine_connection.recv() => {
+                            inbound = socket_connection.recv() => {
                                 match inbound {
                                     Ok(inbound) => {
                                         if self.resolver_manager.try_resolve(&inbound).await {
@@ -83,21 +83,23 @@ impl Pulsar {
         }
     }
 
-    pub async fn handle_connection_inbound(
+    pub async fn handle_socket_connection_inbound(
         &self,
         client_connection: &EngineConnection<Inbound, Outbound>,
-        _engine_connection: &EngineConnection<Outbound, Inbound>,
+        socket_connection: &EngineConnection<Outbound, Inbound>,
         inbound: &ResultInbound,
     ) -> Result<(), NeutronError> {
         match inbound {
             Ok(inbound_cmd) => match inbound_cmd {
                 Inbound::Connection(ConnectionInbound::Ping) => {
-                    _engine_connection
+                    socket_connection
                         .send(Ok(Outbound::Connection(ConnectionOutbound::Pong)))
                         .await
                         .unwrap();
                 }
-                _ => (),
+                inbound => {
+                    client_connection.send(Ok(inbound.clone())).await.unwrap();
+                }
             },
             Err(inbound_err) => match inbound_err {
                 NeutronError::Disconnected => {
@@ -112,25 +114,13 @@ impl Pulsar {
         Ok(())
     }
 
-    pub async fn handle_connection_outbound(
+    pub async fn handle_client_connection_outbound(
         &self,
-        _outbound: &ResultOutbound,
+        _client_connection: &EngineConnection<Inbound, Outbound>,
+        socket_connection: &EngineConnection<Outbound, Inbound>,
+        outbound: &ResultOutbound,
     ) -> Result<(), NeutronError> {
-        Ok(())
-    }
-
-    pub async fn handle_client_inbound(
-        &self,
-        _inbound: &ResultInbound,
-    ) -> Result<(), NeutronError> {
-        Ok(())
-    }
-
-    pub async fn handle_client_outbound(
-        &self,
-        _outbound: &ResultOutbound,
-    ) -> Result<(), NeutronError> {
-        Ok(())
+        socket_connection.send(outbound.clone()).await
     }
 
     pub async fn connect(&self) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
@@ -151,12 +141,12 @@ impl Pulsar {
     }
 
     pub async fn next(&self) -> bool {
-        match (&self.client_connection, &self.connection_engine) {
-            (Some(client_connection), Some(connection_engine)) => {
+        match (&self.client_connection, &self.socket_connection) {
+            (Some(client_connection), Some(socket_connection)) => {
                 if let Some(inbound) = self.inbound_buffer.lock().await.pop() {
-                    self.handle_connection_inbound(
+                    self.handle_socket_connection_inbound(
                         &client_connection,
-                        &connection_engine,
+                        &socket_connection,
                         &Ok(inbound),
                     )
                     .await
@@ -167,17 +157,17 @@ impl Pulsar {
                     outbound = client_connection.recv() => {
                         if is_disconnect(&outbound) {
                             log::debug!("Client connection disconnected");
-                            connection_engine.send(Err(NeutronError::Disconnected)).await.unwrap();
+                            socket_connection.send(Err(NeutronError::Disconnected)).await.unwrap();
                         }
-                        self.handle_client_outbound(&outbound).await.unwrap();
+                        self.handle_client_connection_outbound(&client_connection, &socket_connection, &outbound).await.unwrap();
                     }
-                    inbound = connection_engine.recv() => {
+                    inbound = socket_connection.recv() => {
                         if is_disconnect(&inbound) {
                             log::debug!("Connection engine disconnected");
                             client_connection.send(Err(NeutronError::Disconnected)).await.unwrap();
                             return true;
                         }
-                        self.handle_connection_inbound(&client_connection, &connection_engine, &inbound).await.unwrap();
+                        self.handle_socket_connection_inbound(&client_connection, &socket_connection, &inbound).await.unwrap();
                     }
                 };
                 ()
@@ -195,7 +185,7 @@ impl Pulsar {
         let inbound = self.connect().await;
         match inbound {
             Ok(inbound) => {
-                self.connection_engine = Some(inbound);
+                self.socket_connection = Some(inbound);
             }
             Err(e) => {
                 log::error!("Failed to connect to pulsar broker: {}", e);
