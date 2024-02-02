@@ -1,4 +1,6 @@
-use bytes::BufMut;
+use std::io::Cursor;
+
+use bytes::{Buf, BufMut};
 use nom::{
     bytes::streaming::take,
     number::streaming::{be_u16, be_u32},
@@ -6,9 +8,11 @@ use nom::{
 };
 use protobuf::{Message as _, MessageField};
 
-use crate::resolver_manager::{Resolvable, ResolverKey};
-
 use self::proto::pulsar::{AuthData, BaseCommand, MessageIdData, MessageMetadata};
+use crate::{
+    error::NeutronError,
+    resolver_manager::{Resolvable, ResolverKey},
+};
 
 pub mod proto {
     #![allow(clippy::all)]
@@ -651,7 +655,7 @@ impl TryFrom<&[u8]> for Message {
 
         let payload = payload.map(|p| Payload {
             metadata: MessageMetadata::parse_from_bytes(p.metadata).unwrap(),
-            data: bytes.to_vec(),
+            data: bytes[p.metadata_size as usize..].to_vec(),
         });
 
         Ok(Message { command, payload })
@@ -714,7 +718,7 @@ impl Into<Vec<u8>> for Payload {
 
 struct CommandFrame<'a> {
     #[allow(dead_code)]
-    total_size: u32,
+    pub(crate) total_size: u32,
     #[allow(dead_code)]
     command_size: u32,
     command: &'a [u8],
@@ -760,6 +764,66 @@ fn payload_frame(bytes: &[u8]) -> IResult<&[u8], PayloadFrame> {
     ))
 }
 
+pub struct Codec;
+
+impl From<std::io::Error> for NeutronError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn from(err: std::io::Error) -> Self {
+        NeutronError::Io
+    }
+}
+
+impl tokio_util::codec::Encoder<Message> for Codec {
+    type Error = NeutronError;
+    fn encode(&mut self, item: Message, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        let bytes: Vec<u8> = item.into();
+        dst.extend_from_slice(bytes.as_slice());
+        Ok(())
+    }
+}
+
+impl tokio_util::codec::Decoder for Codec {
+    type Item = Message;
+    type Error = NeutronError;
+
+    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if src.len() < 4 {
+            return Ok(None);
+        }
+        let mut buf = Cursor::new(src);
+        let message_size = buf.get_u32() as usize + 4;
+        let src = buf.into_inner();
+        if src.len() >= message_size {
+            let (bytes, command_frame) = command_frame(&src[..message_size]).unwrap();
+            let command = BaseCommand::parse_from_bytes(command_frame.command).unwrap();
+
+            let (bytes, payload_frame) = match bytes.is_empty() {
+                false => payload_frame(bytes)
+                    .map(|(bytes, p)| (bytes, Some(p)))
+                    .map_err(|e| e)
+                    .unwrap_or((bytes, None)),
+                true => (bytes, None),
+            };
+
+            let payload = payload_frame.as_ref().map(|p| {
+                let metadata = MessageMetadata::parse_from_bytes(p.metadata).unwrap();
+                Payload {
+                    metadata,
+                    data: bytes[8..].to_vec(),
+                }
+            });
+
+            src.advance(message_size as usize);
+
+            let message = Message { command, payload };
+
+            Ok(Some(message))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Payload {
     /// message metadata added by Pulsar
@@ -770,8 +834,11 @@ pub struct Payload {
 
 #[cfg(test)]
 mod test {
-    use protobuf::Enum;
+    use bytes::BytesMut;
+    use protobuf::{Enum, MessageField};
+    use tokio_util::codec::{Decoder, Encoder};
 
+    use super::{proto::pulsar::MessageIdData, Codec};
     use crate::message::Message;
 
     #[test]
@@ -784,9 +851,9 @@ mod test {
             0x2D, 0x70, 0x75, 0x6C, 0x73, 0x61, 0x72, 0x2D, 0x38,
         ];
 
-        let message: Message = input.try_into().unwrap();
-        let send = message.clone().command.send.unwrap();
+        let message = Codec.decode(&mut input.into()).unwrap().unwrap();
         {
+            let send = message.clone().command.send.unwrap();
             assert_eq!(send.producer_id(), 0);
             assert_eq!(send.sequence_id(), 8);
         }
@@ -799,6 +866,44 @@ mod test {
 
         let output: Vec<u8> = message.into();
         assert_eq!(output.as_slice(), input);
+    }
+
+    #[test]
+    fn encode_then_decode() {
+        let input = Message {
+            command: {
+                let mut base = super::proto::pulsar::BaseCommand::new();
+                base.set_type(super::proto::pulsar::base_command::Type::SEND);
+                let mut send = super::proto::pulsar::CommandSend::new();
+                send.set_producer_id(0);
+                send.set_sequence_id(8);
+                send.set_num_messages(1);
+                send.message_id = MessageField::some({
+                    let mut message_id = super::proto::pulsar::MessageIdData::new();
+                    message_id.set_ledgerId(0);
+                    message_id.set_entryId(0);
+                    message_id.set_partition(0);
+                    message_id.set_batch_index(0);
+                    message_id.set_batch_size(0);
+                    message_id
+                });
+                base.send = MessageField::some(send);
+                base
+            },
+            payload: Some(super::Payload {
+                metadata: {
+                    let mut metadata = super::proto::pulsar::MessageMetadata::new();
+                    metadata.set_producer_name("standalone-0-3".to_string());
+                    metadata.set_sequence_id(8);
+                    metadata.set_publish_time(1533850624062);
+                    metadata
+                },
+                data: vec![0, 1, 2, 3, 4, 5, 6, 7],
+            }),
+        };
+        let mut buf = BytesMut::new();
+        Codec.encode(input, &mut buf).unwrap();
+        let decoded = Codec.decode(&mut buf.into()).unwrap();
     }
 
     #[test]

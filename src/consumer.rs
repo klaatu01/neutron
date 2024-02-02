@@ -1,6 +1,6 @@
 use crate::{
     engine::{Engine, EngineConnection},
-    message::{ClientOutbound, Inbound, Outbound},
+    message::{ClientInbound, ClientOutbound, Inbound, Outbound},
     resolver_manager::ResolverManager,
     PulsarConfig,
 };
@@ -148,9 +148,11 @@ impl Consumer {
                 let inbound = engine_connection.recv().await;
                 match inbound {
                     Ok(inbound) => {
-                        log::debug!("Received inbound: {:?}", inbound);
+                        if let Inbound::Client(ClientInbound::Message { payload, .. }) = &inbound {
+                        };
                         return Ok(inbound);
                     }
+
                     Err(e) => {
                         log::warn!("{}", e);
                         return Err(e);

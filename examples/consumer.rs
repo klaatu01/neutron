@@ -8,10 +8,10 @@ struct Data {
 impl TryFrom<Vec<u8>> for Data {
     type Error = Box<dyn std::error::Error>;
 
-    fn try_from(_: Vec<u8>) -> Result<Self, Self::Error> {
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Ok(Data {
             id: 0,
-            name: "test".to_string(),
+            name: String::from_utf8(value).unwrap(),
         })
     }
 }
@@ -35,6 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect()
         .await?;
 
-    consumer.next().await?;
+    for x in 0..1001 {
+        let next = consumer.next().await?;
+    }
+
     Ok(())
 }

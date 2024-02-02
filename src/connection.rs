@@ -1,68 +1,64 @@
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
-use crate::message::{Inbound, Message, Outbound};
+use crate::message::{Codec, Inbound, Message, Outbound};
 use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+use tokio_util::codec::Framed;
 
 type ResultInbound = Result<Inbound, NeutronError>;
 type ResultOutbound = Result<Outbound, NeutronError>;
 
 pub struct PulsarConnection {
-    sink: WriteHalf<TcpStream>,
-    stream: ReadHalf<TcpStream>,
+    stream: Framed<TcpStream, Codec>,
 }
 
 impl PulsarConnection {
     pub async fn connect(host: &String, port: &u16) -> Self {
         let addr = format!("{}:{}", host, port);
         log::debug!("Opening connection to {}", addr);
-        let tcp_stream = TcpStream::connect(addr).await.unwrap();
+        let stream = TcpStream::connect(addr)
+            .await
+            .map(|stream| tokio_util::codec::Framed::new(stream, Codec))
+            .unwrap();
         log::debug!("Connection opened");
-        let (stream, sink) = tokio::io::split(tcp_stream);
 
-        Self { sink, stream }
+        Self { stream }
     }
 
     pub async fn start_connection(
         &mut self,
         client_connection: EngineConnection<Inbound, Outbound>,
     ) {
-        let mut buf = Vec::new();
         loop {
-            buf.clear();
             tokio::select! {
                 outbound = client_connection.recv() => {
                     match outbound {
                         Ok(outbound) => {
-                            log::debug!("-> {:?}", outbound);
+                            log::debug!("{}", outbound.to_string());
                             let msg: Message = outbound.into();
-                            let bytes: Vec<u8> = msg.into();
                             let _ = self
-                                .sink
-                                .write_all(&bytes).await;
+                                .stream.send(msg).await;
                         }
                         Err(e) => {
                             log::warn!("{}", e);
                         }
                     }
                 },
-                bytes = self.stream.read_buf(&mut buf) => {
-                    let inbound = match bytes {
-                        Ok(0) => {
+                message = self.stream.next() => {
+                    let inbound = match message {
+                        None => {
                             log::warn!("Connection closed");
                             Err(NeutronError::Disconnected)
                         }
-                        Ok(_) => Message::try_from(&buf)
-                            .map_err(|_| NeutronError::DecodeFailed)
-                            .and_then(|msg| {
-                                Inbound::try_from(&msg)
-                                    .map_err(|_| NeutronError::UnsupportedCommand)
-                            }),
-                        Err(e) => {
+                        Some(Ok(message)) =>
+                                Inbound::try_from(&message)
+                                    .map_err(|_| NeutronError::UnsupportedCommand),
+                        Some(Err(e)) => {
                             log::warn!("Error: {}", e);
                             Err(NeutronError::DecodeFailed)
                         }
@@ -74,7 +70,7 @@ impl PulsarConnection {
 
                     match &inbound {
                         Ok(inbound) => {
-                            log::debug!("<- {:?}", inbound);
+                            log::debug!("{}", inbound.to_string());
                         }
                         Err(NeutronError::Disconnected) => {
                             log::warn!("Disconnected");
