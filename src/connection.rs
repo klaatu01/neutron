@@ -1,242 +1,100 @@
-use futures::Future;
-use futures::{lock::Mutex, FutureExt};
-use std::collections::HashMap;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use crate::codec::Codec;
+use crate::engine::{Engine, EngineConnection};
+use crate::error::NeutronError;
+use crate::message::{Inbound, Message, Outbound};
+use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
+use tokio::net::TcpStream;
+use tokio_util::codec::Framed;
 
-use crate::{
-    message::{
-        proto::pulsar::MessageIdData, ClientInbound, ClientOutbound, ConnectionInbound,
-        ConnectionOutbound, EngineInbound, EngineOutbound, Inbound, Message, Outbound, SendReceipt,
-    },
-    resolver_manager::{Resolvable, ResolverManager},
-    PulsarConfig,
-};
-
-#[derive(Debug, Clone)]
-pub enum PulsarConnectionError {
-    Disconnected,
-    Timeout,
-    UnsupportedCommand,
-}
-
-impl std::fmt::Display for PulsarConnectionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            PulsarConnectionError::Disconnected => write!(f, "Disconnected"),
-            PulsarConnectionError::Timeout => write!(f, "Timeout"),
-            PulsarConnectionError::UnsupportedCommand => write!(f, "Unsupported command"),
-        }
-    }
-}
-
-impl std::error::Error for PulsarConnectionError {}
+type ResultInbound = Result<Inbound, NeutronError>;
+type ResultOutbound = Result<Outbound, NeutronError>;
 
 pub struct PulsarConnection {
-    send_tx: async_channel::Sender<Outbound>,
-    recv_rx: async_channel::Receiver<Inbound>,
+    stream: Framed<TcpStream, Codec>,
 }
 
 impl PulsarConnection {
     pub async fn connect(host: &String, port: &u16) -> Self {
         let addr = format!("{}:{}", host, port);
-        println!("Connecting to {}", addr);
-        let tcp_stream = TcpStream::connect(addr).await.unwrap();
-        let (mut stream, mut sink) = tokio::io::split(tcp_stream);
+        log::debug!("Opening connection to {}", addr);
+        let stream = TcpStream::connect(addr)
+            .await
+            .map(|stream| tokio_util::codec::Framed::new(stream, Codec))
+            .unwrap();
+        log::debug!("Connection opened");
 
-        let (send_tx, send_rx) = async_channel::unbounded::<Outbound>();
-        let (recv_tx, recv_rx) = async_channel::unbounded::<Inbound>();
+        Self { stream }
+    }
 
-        let stream_send_tx = send_tx.clone();
-        tokio::spawn(async move {
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                match stream.read_buf(&mut buf).await {
-                    Ok(0) => {
-                        println!("Socket closed");
-                        break;
-                    }
-                    Ok(_) => match Message::try_from(&buf) {
-                        Ok(msg) => {
-                            let inbound = Inbound::try_from(&msg);
-                            match inbound {
-                                Ok(Inbound::Connection(e)) => {
-                                    println!("<- {:?}", e.base_command());
-                                    Self::handle_connection_inbound(e, &stream_send_tx)
-                                        .await
-                                        .unwrap();
-                                }
-                                Ok(cmd) => {
-                                    println!("{}", cmd.to_string());
-                                    recv_tx.send(cmd).await.unwrap();
-                                }
-                                Err(e) => {
-                                    println!("Error while parsing message: {}", e);
-                                }
-                            }
+    pub async fn start_connection(
+        &mut self,
+        client_connection: EngineConnection<Inbound, Outbound>,
+    ) {
+        loop {
+            tokio::select! {
+                outbound = client_connection.recv() => {
+                    match outbound {
+                        Ok(outbound) => {
+                            log::debug!("{}", outbound.to_string());
+                            let msg: Message = outbound.into();
+                            let _ = self
+                                .stream.send(msg).await;
                         }
                         Err(e) => {
-                            println!("Error while parsing message: {}", e);
+                            log::warn!("{}", e);
                         }
-                    },
-                    Err(e) => {
-                        println!("Error while reading from socket: {}", e);
+                    }
+                },
+                message = self.stream.next() => {
+                    let inbound = match message {
+                        None => {
+                            log::warn!("Connection closed");
+                            Err(NeutronError::Disconnected)
+                        }
+                        Some(Ok(message)) =>
+                                Inbound::try_from(&message)
+                                    .map_err(|_| NeutronError::UnsupportedCommand),
+                        Some(Err(e)) => {
+                            log::warn!("Error: {}", e);
+                            Err(NeutronError::DecodeFailed)
+                        }
+                    };
+
+                    if let Err(_) = client_connection.send(inbound.clone()).await {
                         break;
                     }
+
+                    match &inbound {
+                        Ok(inbound) => {
+                            log::debug!("{}", inbound.to_string());
+                        }
+                        Err(NeutronError::Disconnected) => {
+                            log::warn!("Disconnected");
+                            break;
+                        }
+                        Err(e) => {
+                            log::warn!("Error: {}", e);
+                        }
+                    }
                 }
-            }
-        });
-
-        tokio::spawn(async move {
-            while let Ok(msg) = send_rx.recv().await {
-                println!("{}", msg.to_string());
-                let msg: Message = msg.into();
-                let bytes: Vec<u8> = msg.into();
-                if let Err(e) = sink.write_all(&bytes).await {
-                    println!("Error while writing to socket: {}", e);
-                    break;
-                }
-            }
-        });
-
-        PulsarConnection { send_tx, recv_rx }
-    }
-
-    async fn handle_connection_inbound(
-        message: ConnectionInbound,
-        send_tx: &async_channel::Sender<Outbound>,
-    ) -> Result<(), PulsarConnectionError> {
-        match message {
-            ConnectionInbound::Ping => {
-                send_tx.send(ConnectionOutbound::Pong.into()).await.unwrap();
             }
         }
-        Ok(())
-    }
-
-    pub async fn send(&self, msg: Outbound) -> Result<(), PulsarConnectionError> {
-        self.send_tx
-            .send(msg)
-            .await
-            .map_err(|_| PulsarConnectionError::Disconnected)
-    }
-
-    pub async fn recv(&self) -> Result<Inbound, PulsarConnectionError> {
-        self.recv_rx
-            .recv()
-            .await
-            .map_err(|_| PulsarConnectionError::Disconnected)
     }
 }
 
-pub struct PulsarConnectionManager {
-    config: PulsarConfig,
-    connection: Option<PulsarConnection>,
-    resolver_manager: ResolverManager<Inbound>,
-}
+#[async_trait]
+impl Engine<Inbound, Outbound> for PulsarConnection {
+    async fn run(mut self) -> EngineConnection<Outbound, Inbound> {
+        let (tx, _rx) = async_channel::unbounded::<ResultInbound>();
+        let (_tx, rx) = async_channel::unbounded::<ResultOutbound>();
 
-impl PulsarConnectionManager {
-    pub fn new(config: &PulsarConfig) -> Self {
-        PulsarConnectionManager {
-            config: config.clone(),
-            connection: None,
-            resolver_manager: ResolverManager::new(),
-        }
-    }
+        let client_connection = EngineConnection::new(tx, rx);
 
-    pub async fn connect(&mut self) -> Result<(), PulsarConnectionError> {
-        let connection =
-            PulsarConnection::connect(&self.config.endpoint_url, &self.config.endpoint_port).await;
-        self.connection = Some(connection);
+        tokio::task::spawn(async move {
+            self.start_connection(client_connection).await;
+        });
 
-        let start = std::time::Instant::now();
-        let inbound = self
-            .send_and_resolve(EngineOutbound::Connect { auth_data: None }.into())
-            .await?;
-
-        if let Inbound::Engine(EngineInbound::Connected) = inbound {
-            println!("Connected in {}ms", start.elapsed().as_millis());
-            return Ok(());
-        } else {
-            return Err(PulsarConnectionError::UnsupportedCommand);
-        }
-    }
-
-    pub async fn send(&self, message: Outbound) -> Result<(), PulsarConnectionError> {
-        if let Some(connection) = &self.connection {
-            return connection
-                .send(message.into())
-                .await
-                .map_err(|_| PulsarConnectionError::Disconnected)
-                .map(|_| ());
-        }
-        panic!("Not connected");
-    }
-
-    pub async fn send_and_resolve(
-        &self,
-        outbound: Outbound,
-    ) -> Result<Inbound, PulsarConnectionError> {
-        if let Some(connection) = &self.connection {
-            return if let Some(resolver) = self.resolver_manager.put_resolver(&outbound).await {
-                connection
-                    .send(outbound.into())
-                    .await
-                    .map_err(|_| PulsarConnectionError::Disconnected)?;
-                let inbound = resolver.await.map_err(|_| PulsarConnectionError::Timeout)?;
-                Ok(inbound)
-            } else {
-                Err(PulsarConnectionError::Timeout)
-            };
-        }
-        Err(PulsarConnectionError::Disconnected)
-    }
-
-    async fn handle_engine_inbound(
-        &self,
-        message: EngineInbound,
-    ) -> Result<(), PulsarConnectionError> {
-        match message {
-            _ => {}
-        }
-        Ok(())
-    }
-
-    async fn next_inbound(&self) -> Result<Inbound, PulsarConnectionError> {
-        if let Some(connection) = &self.connection {
-            let inbound: Inbound = connection
-                .recv()
-                .await
-                .map_err(|_| PulsarConnectionError::Disconnected)?;
-            Ok(inbound)
-        } else {
-            panic!("Not connected");
-        }
-    }
-
-    pub async fn recv(&self) -> Result<ClientInbound, PulsarConnectionError> {
-        loop {
-            if let Some(connection) = &self.connection {
-                let inbound: Inbound = connection
-                    .recv()
-                    .await
-                    .map_err(|_| PulsarConnectionError::Disconnected)?;
-
-                match inbound {
-                    Inbound::Engine(engine_inbound) => {
-                        self.handle_engine_inbound(engine_inbound.clone()).await?;
-                    }
-                    Inbound::Client(client_inbound) => {
-                        return Ok(client_inbound);
-                    }
-                    _ => {}
-                }
-            } else {
-                panic!("Not connected");
-            }
-        }
+        EngineConnection::new(_tx, _rx)
     }
 }

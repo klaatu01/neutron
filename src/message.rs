@@ -1,4 +1,6 @@
-use bytes::BufMut;
+use std::io::Cursor;
+
+use bytes::{Buf, BufMut};
 use nom::{
     bytes::streaming::take,
     number::streaming::{be_u16, be_u32},
@@ -6,9 +8,11 @@ use nom::{
 };
 use protobuf::{Message as _, MessageField};
 
-use crate::resolver_manager::{Resolvable, ResolverKey};
-
 use self::proto::pulsar::{AuthData, BaseCommand, MessageIdData, MessageMetadata};
+use crate::{
+    codec::Payload,
+    resolver_manager::{Resolvable, ResolverKey},
+};
 
 pub mod proto {
     #![allow(clippy::all)]
@@ -46,7 +50,7 @@ impl Resolvable for Outbound {
         match self {
             Outbound::Engine(command) => command.resolver_id(),
             Outbound::Client(command) => command.resolver_id(),
-            _ => None,
+            Outbound::Connection(command) => command.resolver_id(),
         }
     }
 }
@@ -96,7 +100,7 @@ impl Resolvable for Inbound {
         match self {
             Inbound::Engine(command) => command.resolver_id(),
             Inbound::Client(command) => command.resolver_id(),
-            _ => None,
+            Inbound::Connection(command) => command.resolver_id(),
         }
     }
 }
@@ -135,6 +139,7 @@ impl TryFrom<&Message> for Inbound {
 #[derive(Debug, Clone)]
 pub enum ConnectionInbound {
     Ping,
+    Pong,
 }
 
 impl TryFrom<&Message> for ConnectionInbound {
@@ -142,6 +147,7 @@ impl TryFrom<&Message> for ConnectionInbound {
     fn try_from(message: &Message) -> Result<ConnectionInbound, Self::Error> {
         match message.command.type_() {
             proto::pulsar::base_command::Type::PING => Ok(ConnectionInbound::Ping),
+            proto::pulsar::base_command::Type::PONG => Ok(ConnectionInbound::Pong),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Unsupported command",
@@ -154,6 +160,16 @@ impl ConnectionInbound {
     pub fn base_command(&self) -> proto::pulsar::base_command::Type {
         match self {
             ConnectionInbound::Ping => proto::pulsar::base_command::Type::PING,
+            ConnectionInbound::Pong => proto::pulsar::base_command::Type::PONG,
+        }
+    }
+}
+
+impl Resolvable for ConnectionInbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            ConnectionInbound::Pong => Some("PINGPONG".to_string()),
+            _ => None,
         }
     }
 }
@@ -162,6 +178,7 @@ impl ConnectionInbound {
 #[derive(Debug, Clone)]
 pub enum ConnectionOutbound {
     Pong,
+    Ping,
 }
 
 impl Into<Outbound> for ConnectionOutbound {
@@ -183,6 +200,16 @@ impl Into<Message> for ConnectionOutbound {
                     payload: None,
                 }
             }
+            ConnectionOutbound::Ping => {
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.set_type(proto::pulsar::base_command::Type::PING);
+                let ping = proto::pulsar::CommandPing::new();
+                base.ping = MessageField::some(ping);
+                Message {
+                    command: base,
+                    payload: None,
+                }
+            }
         }
     }
 }
@@ -191,6 +218,16 @@ impl ConnectionOutbound {
     pub fn base_command(&self) -> proto::pulsar::base_command::Type {
         match self {
             ConnectionOutbound::Pong => proto::pulsar::base_command::Type::PONG,
+            ConnectionOutbound::Ping => proto::pulsar::base_command::Type::PING,
+        }
+    }
+}
+
+impl Resolvable for ConnectionOutbound {
+    fn resolver_id(&self) -> Option<ResolverKey> {
+        match self {
+            ConnectionOutbound::Ping => Some("PINGPONG".to_string()),
+            _ => None,
         }
     }
 }
@@ -324,6 +361,20 @@ pub enum ClientInbound {
         message_id: MessageIdData,
         payload: Vec<u8>,
     },
+    LookupTopic {
+        request_id: u64,
+        broker_service_url: String,
+        broker_service_url_tls: String,
+        response: proto::pulsar::command_lookup_topic_response::LookupType,
+        authoritative: bool,
+    },
+    Success {
+        request_id: u64,
+    },
+    AckResponse {
+        consumer_id: u64,
+        request_id: u64,
+    },
 }
 
 impl Resolvable for ClientInbound {
@@ -334,6 +385,9 @@ impl Resolvable for ClientInbound {
                 sequence_id,
                 ..
             } => Some(format!("{producer_id}:{sequence_id}")),
+            ClientInbound::LookupTopic { request_id, .. } => Some(format!("LOOKUP:{request_id}")),
+            ClientInbound::Success { request_id } => Some(format!("SUCCESS:{request_id}")),
+            ClientInbound::AckResponse { request_id, .. } => Some(format!("ACK:{request_id}")),
         }
     }
 }
@@ -351,6 +405,38 @@ impl TryFrom<&Message> for ClientInbound {
                     payload,
                     producer_id,
                     sequence_id: 0,
+                })
+            }
+            proto::pulsar::base_command::Type::LOOKUP_RESPONSE => {
+                let lookup_topic = &message.command.lookupTopicResponse;
+                let request_id = lookup_topic.request_id();
+                let broker_service_url = lookup_topic.brokerServiceUrl().to_string();
+                let broker_service_url_tls = lookup_topic.brokerServiceUrlTls().to_string();
+                let response = lookup_topic.response();
+                let authoritative = lookup_topic.authoritative();
+                Ok(ClientInbound::LookupTopic {
+                    request_id,
+                    broker_service_url,
+                    broker_service_url_tls,
+                    response,
+                    authoritative,
+                })
+            }
+            proto::pulsar::base_command::Type::SUCCESS => {
+                let success = &message.command.success;
+                let request_id = success.request_id();
+                Ok(ClientInbound::Success { request_id })
+            }
+            proto::pulsar::base_command::Type::ACK_RESPONSE => {
+                let ack = &message.command.ackResponse;
+                let consumer_id = ack.consumer_id();
+                let request_id = ack.request_id();
+                if ack.has_error() {
+                    println!("Error: {:?}", ack.error());
+                }
+                Ok(ClientInbound::AckResponse {
+                    consumer_id,
+                    request_id,
                 })
             }
             _ => Err(std::io::Error::new(
@@ -371,8 +457,18 @@ impl ClientInbound {
     pub fn base_command(&self) -> proto::pulsar::base_command::Type {
         match self {
             ClientInbound::Message { .. } => proto::pulsar::base_command::Type::MESSAGE,
+            ClientInbound::LookupTopic { .. } => proto::pulsar::base_command::Type::LOOKUP_RESPONSE,
+            ClientInbound::Success { .. } => proto::pulsar::base_command::Type::SUCCESS,
+            ClientInbound::AckResponse { .. } => proto::pulsar::base_command::Type::ACK_RESPONSE,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Ack {
+    pub consumer_id: u64,
+    pub message_id: MessageIdData,
+    pub request_id: u64,
 }
 
 #[allow(dead_code)]
@@ -384,12 +480,27 @@ pub enum ClientOutbound {
         message_id: MessageIdData,
         payload: Vec<u8>,
     },
-    Ack(Vec<MessageIdData>),
+    Ack(Vec<Ack>),
     Ping,
     Pong,
     CloseProducer,
     CloseConsumer,
     AuthChallenge(Vec<u8>),
+    LookupTopic {
+        topic: String,
+        request_id: u64,
+    },
+    Subscribe {
+        topic: String,
+        subscription: String,
+        consumer_id: u64,
+        request_id: u64,
+        sub_type: proto::pulsar::command_subscribe::SubType,
+    },
+    Flow {
+        consumer_id: u64,
+        message_permits: u32,
+    },
 }
 
 impl Resolvable for ClientOutbound {
@@ -400,6 +511,12 @@ impl Resolvable for ClientOutbound {
                 sequence_id,
                 ..
             } => Some(format!("{producer_id}:{sequence_id}")),
+            ClientOutbound::LookupTopic { request_id, .. } => Some(format!("LOOKUP:{request_id}")),
+            ClientOutbound::Subscribe { request_id, .. } => Some(format!("SUCCESS:{request_id}")),
+            ClientOutbound::Ack(acks) => {
+                let ack = acks.first().unwrap();
+                Some(format!("ACK:{}", ack.request_id))
+            }
             _ => None,
         }
     }
@@ -424,17 +541,19 @@ impl Into<Message> for ClientOutbound {
                 base.set_type(proto::pulsar::base_command::Type::SEND.into());
                 base
             }
-            ClientOutbound::Ack(message_ids) => {
+            ClientOutbound::Ack(acks) => {
                 let mut ack = proto::pulsar::CommandAck::new();
                 ack.set_consumer_id(0);
 
-                if message_ids.len() > 1 {
+                if acks.len() > 1 {
                     ack.set_ack_type(proto::pulsar::command_ack::AckType::Cumulative);
                 } else {
                     ack.set_ack_type(proto::pulsar::command_ack::AckType::Individual);
                 }
 
-                ack.message_id = message_ids.clone();
+                ack.message_id = acks.iter().map(|id| id.message_id.clone()).collect();
+                ack.request_id = acks.first().unwrap().request_id.into();
+
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.ack = MessageField::some(ack);
                 base.set_type(proto::pulsar::base_command::Type::ACK.into());
@@ -474,6 +593,46 @@ impl Into<Message> for ClientOutbound {
                 base.set_type(proto::pulsar::base_command::Type::AUTH_CHALLENGE.into());
                 base
             }
+            ClientOutbound::LookupTopic { topic, request_id } => {
+                let mut lookup_topic = proto::pulsar::CommandLookupTopic::new();
+                lookup_topic.set_topic(topic.to_string());
+                lookup_topic.set_request_id(*request_id);
+                lookup_topic.set_authoritative(false);
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.lookupTopic = MessageField::some(lookup_topic);
+                base.set_type(proto::pulsar::base_command::Type::LOOKUP.into());
+                base
+            }
+            ClientOutbound::Subscribe {
+                topic,
+                subscription,
+                consumer_id,
+                request_id,
+                sub_type,
+            } => {
+                let mut subscribe = proto::pulsar::CommandSubscribe::new();
+                subscribe.set_topic(topic.to_string());
+                subscribe.set_subscription(subscription.to_string());
+                subscribe.set_consumer_id(*consumer_id);
+                subscribe.set_request_id(*request_id);
+                subscribe.set_subType(*sub_type);
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.subscribe = MessageField::some(subscribe);
+                base.set_type(proto::pulsar::base_command::Type::SUBSCRIBE.into());
+                base
+            }
+            ClientOutbound::Flow {
+                consumer_id,
+                message_permits,
+            } => {
+                let mut flow = proto::pulsar::CommandFlow::new();
+                flow.set_consumer_id(*consumer_id);
+                flow.set_messagePermits(*message_permits);
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.flow = MessageField::some(flow);
+                base.set_type(proto::pulsar::base_command::Type::FLOW.into());
+                base
+            }
         };
 
         let payload = match self {
@@ -498,6 +657,9 @@ impl ClientOutbound {
             ClientOutbound::CloseProducer => proto::pulsar::base_command::Type::CLOSE_PRODUCER,
             ClientOutbound::CloseConsumer => proto::pulsar::base_command::Type::CLOSE_CONSUMER,
             ClientOutbound::AuthChallenge(_) => proto::pulsar::base_command::Type::AUTH_CHALLENGE,
+            ClientOutbound::LookupTopic { .. } => proto::pulsar::base_command::Type::LOOKUP,
+            ClientOutbound::Subscribe { .. } => proto::pulsar::base_command::Type::SUBSCRIBE,
+            ClientOutbound::Flow { .. } => proto::pulsar::base_command::Type::FLOW,
         }
     }
 }
@@ -508,169 +670,13 @@ impl Into<Outbound> for ClientOutbound {
     }
 }
 
-impl TryFrom<&[u8]> for Message {
-    type Error = std::io::Error;
-    fn try_from(bytes: &[u8]) -> Result<Message, Self::Error> {
-        let (bytes, command) = command_frame(bytes).unwrap();
-
-        let (bytes, payload) = match bytes.is_empty() {
-            false => payload_frame(bytes)
-                .map(|(bytes, p)| (bytes, Some(p)))
-                .unwrap_or((bytes, None)),
-            true => (bytes, None),
-        };
-
-        let command = BaseCommand::parse_from_bytes(command.command).unwrap();
-
-        let payload = payload.map(|p| Payload {
-            metadata: MessageMetadata::parse_from_bytes(p.metadata).unwrap(),
-            data: bytes.to_vec(),
-        });
-
-        Ok(Message { command, payload })
-    }
-}
-
-impl TryFrom<Vec<u8>> for Message {
-    type Error = std::io::Error;
-    fn try_from(bytes: Vec<u8>) -> Result<Message, Self::Error> {
-        bytes.as_slice().try_into()
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Message {
-    type Error = std::io::Error;
-    fn try_from(bytes: &Vec<u8>) -> Result<Message, Self::Error> {
-        bytes.as_slice().try_into()
-    }
-}
-
-impl Into<Vec<u8>> for Message {
-    fn into(self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        let command_bytes = self.command.write_to_bytes().unwrap();
-        let command_size = self.command.compute_size() as u32;
-        let header_size = if self.payload.is_some() { 18 } else { 8 };
-        let metadata_size = self
-            .payload
-            .as_ref()
-            .map_or(0, |p| p.metadata.compute_size() as u32);
-        let payload_size = self.payload.as_ref().map_or(0, |p| p.data.len() as u32);
-        let total_size = command_size + metadata_size + payload_size + header_size - 4;
-
-        buf.put_u32(total_size);
-        buf.put_u32(command_size);
-        buf.put_slice(&command_bytes);
-
-        self.payload.map(|payload| {
-            let payload_bytes: Vec<u8> = payload.into();
-            buf.put_slice(&payload_bytes);
-        });
-
-        buf
-    }
-}
-
-impl Into<Vec<u8>> for Payload {
-    fn into(self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.put_u16(0x0e01);
-        buf.put_u32(0);
-        buf.put_u32(self.metadata.compute_size() as u32);
-        buf.put_slice(&self.metadata.write_to_bytes().unwrap());
-        buf.put_slice(&self.data);
-        let checksum = crc32c::crc32c(&buf[6..]);
-        buf[2..6].copy_from_slice(&checksum.to_be_bytes());
-        buf
-    }
-}
-
-struct CommandFrame<'a> {
-    #[allow(dead_code)]
-    total_size: u32,
-    #[allow(dead_code)]
-    command_size: u32,
-    command: &'a [u8],
-}
-
-fn command_frame(bytes: &[u8]) -> IResult<&[u8], CommandFrame> {
-    let (bytes, total_size) = be_u32::<_, nom::error::Error<&[u8]>>(bytes).unwrap();
-    let (bytes, command_size) = be_u32::<_, nom::error::Error<&[u8]>>(bytes).unwrap();
-    let (bytes, command) = take::<_, _, nom::error::Error<&[u8]>>(command_size)(bytes).unwrap();
-    Ok((
-        bytes,
-        CommandFrame {
-            total_size,
-            command_size,
-            command,
-        },
-    ))
-}
-
-struct PayloadFrame<'a> {
-    #[allow(dead_code)]
-    magic_number: u16,
-    #[allow(dead_code)]
-    checksum: u32,
-    #[allow(dead_code)]
-    metadata_size: u32,
-    metadata: &'a [u8],
-}
-
-fn payload_frame(bytes: &[u8]) -> IResult<&[u8], PayloadFrame> {
-    let (bytes, magic_number) = be_u16(bytes)?;
-    let (bytes, checksum) = be_u32(bytes)?;
-    let (bytes, metadata_size) = be_u32(bytes)?;
-    let (bytes, metadata) = take(metadata_size)(bytes)?;
-    Ok((
-        bytes,
-        PayloadFrame {
-            magic_number,
-            checksum,
-            metadata_size,
-            metadata,
-        },
-    ))
-}
-
-#[derive(Debug, Clone)]
-pub struct Payload {
-    /// message metadata added by Pulsar
-    pub metadata: MessageMetadata,
-    /// raw message data
-    pub data: Vec<u8>,
-}
-
-pub struct SendReceipt {
-    pub message_id: MessageIdData,
-    pub rx: futures::channel::oneshot::Receiver<()>,
-}
-
-impl SendReceipt {
-    pub fn create_pair(
-        message_id: &MessageIdData,
-    ) -> (Self, futures::channel::oneshot::Sender<()>) {
-        let (tx, rx) = futures::channel::oneshot::channel();
-        (
-            Self {
-                message_id: message_id.clone(),
-                rx,
-            },
-            tx,
-        )
-    }
-
-    // TODO: This should be a Result of valid error types
-    pub async fn wait_for_receipt(self) -> Result<(), ()> {
-        Ok(self.rx.await.unwrap())
-    }
-}
-
 #[cfg(test)]
 mod test {
-    use protobuf::Enum;
-
+    use crate::codec::Codec;
     use crate::message::Message;
+    use bytes::BytesMut;
+    use protobuf::{Enum, MessageField};
+    use tokio_util::codec::{Decoder, Encoder};
 
     #[test]
     fn parse_payload_command() {
@@ -682,9 +688,9 @@ mod test {
             0x2D, 0x70, 0x75, 0x6C, 0x73, 0x61, 0x72, 0x2D, 0x38,
         ];
 
-        let message: Message = input.try_into().unwrap();
-        let send = message.clone().command.send.unwrap();
+        let message = Codec.decode(&mut input.into()).unwrap().unwrap();
         {
+            let send = message.clone().command.send.unwrap();
             assert_eq!(send.producer_id(), 0);
             assert_eq!(send.sequence_id(), 8);
         }
@@ -694,9 +700,44 @@ mod test {
             assert_eq!(payload.metadata.sequence_id(), 8);
             assert_eq!(payload.metadata.publish_time(), 1533850624062);
         }
+    }
 
-        let output: Vec<u8> = message.into();
-        assert_eq!(output.as_slice(), input);
+    #[test]
+    fn encode_then_decode() {
+        let input = Message {
+            command: {
+                let mut base = super::proto::pulsar::BaseCommand::new();
+                base.set_type(super::proto::pulsar::base_command::Type::SEND);
+                let mut send = super::proto::pulsar::CommandSend::new();
+                send.set_producer_id(0);
+                send.set_sequence_id(8);
+                send.set_num_messages(1);
+                send.message_id = MessageField::some({
+                    let mut message_id = super::proto::pulsar::MessageIdData::new();
+                    message_id.set_ledgerId(0);
+                    message_id.set_entryId(0);
+                    message_id.set_partition(0);
+                    message_id.set_batch_index(0);
+                    message_id.set_batch_size(0);
+                    message_id
+                });
+                base.send = MessageField::some(send);
+                base
+            },
+            payload: Some(super::Payload {
+                metadata: {
+                    let mut metadata = super::proto::pulsar::MessageMetadata::new();
+                    metadata.set_producer_name("standalone-0-3".to_string());
+                    metadata.set_sequence_id(8);
+                    metadata.set_publish_time(1533850624062);
+                    metadata
+                },
+                data: vec![0, 1, 2, 3, 4, 5, 6, 7],
+            }),
+        };
+        let mut buf = BytesMut::new();
+        Codec.encode(input, &mut buf).unwrap();
+        let decoded = Codec.decode(&mut buf.into()).unwrap();
     }
 
     #[test]

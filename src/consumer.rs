@@ -1,47 +1,20 @@
-use crate::message::proto::pulsar::MessageIdData;
-use crate::message::ClientInbound;
-use async_trait::async_trait;
+use std::sync::atomic::AtomicU64;
+
+use crate::{
+    engine::{Engine, EngineConnection},
+    message::{
+        proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
+    },
+    resolver_manager::ResolverManager,
+    PulsarConfig,
+};
+use futures::lock::Mutex;
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use std::fmt::{Display, Formatter};
+use tokio::sync::RwLock;
 
-#[derive(Debug)]
-pub enum PulsarConsumerError {
-    PulsarError(String),
-    DeserializationError(String),
-}
-
-impl std::error::Error for PulsarConsumerError {}
-
-impl Display for PulsarConsumerError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PulsarConsumerError::PulsarError(msg) => write!(f, "PulsarError: {}", msg),
-            PulsarConsumerError::DeserializationError(msg) => {
-                write!(f, "DeserializationError: {}", msg)
-            }
-        }
-    }
-}
-
-#[async_trait]
-pub trait PulsarConsumer {
-    async fn close(&self) -> Result<(), PulsarConsumerError>;
-    async fn ack(&self, message_id: &MessageIdData) -> Result<(), PulsarConsumerError>;
-}
-
-#[cfg(not(feature = "json"))]
-#[async_trait]
-pub trait PulsarConsumerNext<T: TryFrom<Vec<u8>>> {
-    async fn next(&self) -> Result<Message<T>, PulsarConsumerError>;
-}
-
-#[cfg(feature = "json")]
-#[async_trait]
-pub trait PulsarConsumerNext<T: DeserializeOwned> {
-    async fn next(&self) -> Result<Message<T>, PulsarConsumerError>;
-}
+use crate::error::NeutronError;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConsumerConfig {
@@ -51,114 +24,213 @@ pub struct ConsumerConfig {
     pub subscription: String,
 }
 
+type ResultInbound = Result<Inbound, NeutronError>;
+type ResultOutbound = Result<Outbound, NeutronError>;
+
+pub struct Message<T>
+where
+    T: TryFrom<Vec<u8>>,
+{
+    pub payload: T,
+    pub message_id: MessageIdData,
+}
+
 #[allow(dead_code)]
 pub struct Consumer {
-    client: crate::Pulsar,
     config: ConsumerConfig,
+    pulsar_config: PulsarConfig,
+    client_engine_connection: Option<EngineConnection<Outbound, Inbound>>,
+    resolver_manager: ResolverManager<Inbound>,
+    inbound_buffer: Mutex<Vec<Inbound>>,
+    message_permits: u32,
+    current_message_permits: RwLock<u32>,
 }
 
 impl Consumer {
-    pub fn new(client: crate::Pulsar, config: ConsumerConfig) -> Self {
-        Consumer { client, config }
+    pub fn new(pulsar_config: PulsarConfig, consumer_config: ConsumerConfig) -> Self {
+        Self {
+            config: consumer_config,
+            pulsar_config,
+            client_engine_connection: None,
+            resolver_manager: ResolverManager::new(),
+            inbound_buffer: Mutex::new(Vec::new()),
+            message_permits: 20,
+            current_message_permits: RwLock::new(0),
+        }
     }
 
-    pub async fn connect(mut self) -> Result<Self, PulsarConsumerError> {
-        self.client
-            .connect()
-            .await
-            .map_err(|_| PulsarConsumerError::PulsarError("Failed to connect".to_string()))?;
-        // self.register().await?;
-        Ok(self)
+    pub async fn send_and_resolve(
+        &self,
+        socket_connection: &EngineConnection<Outbound, Inbound>,
+        outbound: &ResultOutbound,
+    ) -> ResultInbound {
+        match outbound {
+            Ok(outbound) => match self.resolver_manager.put_resolver(outbound).await {
+                Some(resolver) => {
+                    socket_connection
+                        .send(Ok(outbound.clone()))
+                        .await
+                        .map_err(|_| NeutronError::ChannelTerminated)?;
+
+                    loop {
+                        tokio::select! {
+                            inbound = socket_connection.recv() => {
+                                match inbound {
+                                    Ok(inbound) => {
+                                        if self.resolver_manager.try_resolve(&inbound).await {
+                                            return Ok(inbound);
+                                        } else {
+                                            self.inbound_buffer.lock().await.push(inbound);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        return Err(e)
+                                    }
+                                }
+                            }
+                            inbound = resolver.recv() => {
+                                return inbound.map_err(|_| NeutronError::OperationTimeout);
+                            }
+                        }
+                    }
+                }
+                _ => Err(NeutronError::Unresolvable),
+            },
+            Err(e) => Err(e.clone()),
+        }
     }
 
-    async fn register(&self) -> Result<(), PulsarConsumerError> {
-        unimplemented!();
-    }
-}
-
-pub struct Message<T> {
-    message_id: MessageIdData,
-    payload: T,
-}
-
-impl<T> Message<T> {
-    pub fn payload(&self) -> &T {
-        &self.payload
-    }
-
-    pub fn message_id(&self) -> &MessageIdData {
-        &self.message_id
-    }
-}
-
-#[async_trait]
-impl PulsarConsumer for Consumer {
-    async fn close(&self) -> Result<(), PulsarConsumerError> {
+    async fn flow(
+        &self,
+        client_engine_connection: &EngineConnection<Outbound, Inbound>,
+    ) -> Result<(), NeutronError> {
+        let outbound = Outbound::Client(ClientOutbound::Flow {
+            consumer_id: self.config.consumer_id,
+            message_permits: self.message_permits,
+        });
+        let _ = client_engine_connection.send(Ok(outbound)).await?;
         Ok(())
     }
 
-    async fn ack(&self, message_id: &MessageIdData) -> Result<(), PulsarConsumerError> {
-        self.client
-            .ack(message_id)
-            .await
-            .map_err(|_| PulsarConsumerError::PulsarError("Failed to ack message".to_string()))?;
+    pub async fn subscribe(
+        &self,
+        client_engine_connection: &EngineConnection<Outbound, Inbound>,
+    ) -> Result<(), NeutronError> {
+        let outbound = Outbound::Client(ClientOutbound::Subscribe {
+            topic: self.config.topic.clone(),
+            subscription: self.config.subscription.clone(),
+            consumer_id: self.config.consumer_id,
+            sub_type: crate::message::proto::pulsar::command_subscribe::SubType::Exclusive,
+            request_id: 1,
+        });
+        let _ = self
+            .send_and_resolve(client_engine_connection, &Ok(outbound))
+            .await?;
         Ok(())
     }
-}
 
-#[cfg(not(feature = "json"))]
-#[async_trait]
-impl<T: TryFrom<Vec<u8>>> PulsarConsumerNext<T> for Consumer {
-    async fn next(&self) -> Result<Message<T>, PulsarConsumerError> {
-        loop {
-            let msg = self.client.next_message().await.map_err(|_| {
-                PulsarConsumerError::PulsarError("Failed to receive message".to_string())
-            })?;
+    pub async fn lookup_topic(
+        &self,
+        client_engine_connection: &EngineConnection<Outbound, Inbound>,
+    ) -> Result<(), NeutronError> {
+        let outbound = Outbound::Client(ClientOutbound::LookupTopic {
+            topic: self.config.topic.clone(),
+            request_id: 0,
+        });
+        let _ = self
+            .send_and_resolve(client_engine_connection, &Ok(outbound))
+            .await?;
+        Ok(())
+    }
 
-            #[allow(irrefutable_let_patterns)]
-            if let ClientInbound::Message {
-                message_id,
-                payload,
-                ..
-            } = msg
-            {
-                let payload = T::try_from(payload).map_err(|_| {
-                    PulsarConsumerError::DeserializationError(
-                        "Failed to deserialize message".to_string(),
-                    )
-                })?;
-                return Ok(Message::<T> {
-                    message_id,
-                    payload,
-                });
+    pub async fn connect(self) -> Result<Self, NeutronError> {
+        let client_engine_connection = crate::Pulsar::new(self.pulsar_config.clone()).run().await;
+
+        self.lookup_topic(&client_engine_connection).await?;
+        self.subscribe(&client_engine_connection).await?;
+        self.flow(&client_engine_connection).await?;
+
+        Ok(Consumer {
+            config: self.config,
+            pulsar_config: self.pulsar_config,
+            client_engine_connection: Some(client_engine_connection),
+            resolver_manager: self.resolver_manager,
+            inbound_buffer: Mutex::new(Vec::new()),
+            message_permits: self.message_permits,
+            current_message_permits: RwLock::new(0),
+        })
+    }
+
+    // if the count of message permits is half the max off of the message permits, then send a flow command and reset current message permits to 0
+    async fn check_and_flow(&self) -> Result<(), NeutronError> {
+        {
+            let mut current_message_permits = self.current_message_permits.write().await;
+            if *current_message_permits >= self.message_permits {
+                let client_engine_connection = self.client_engine_connection.as_ref().unwrap();
+                self.flow(client_engine_connection).await?;
+                *current_message_permits = 0;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn next<T>(&self) -> Result<Message<T>, NeutronError>
+    where
+        T: TryFrom<Vec<u8>>,
+    {
+        match &self.client_engine_connection {
+            Some(engine_connection) => loop {
+                self.check_and_flow().await?;
+                let mut inbound_buffer = self.inbound_buffer.lock().await;
+                let inbound = if let Some(inbound) = inbound_buffer.pop() {
+                    Ok(inbound)
+                } else {
+                    engine_connection.recv().await
+                };
+                match inbound {
+                    Ok(inbound) => {
+                        if let Inbound::Client(ClientInbound::Message {
+                            payload,
+                            message_id,
+                            ..
+                        }) = &inbound
+                        {
+                            {
+                                let mut current_message_permits =
+                                    self.current_message_permits.write().await;
+                                *current_message_permits += 1;
+                            }
+                            return T::try_from(payload.clone())
+                                .map(|payload| Message {
+                                    payload,
+                                    message_id: message_id.clone(),
+                                })
+                                .map_err(|_| NeutronError::DeserializationFailed);
+                        };
+                        continue;
+                    }
+                    Err(e) => {
+                        log::warn!("{}", e);
+                        return Err(e);
+                    }
+                }
+            },
+            None => {
+                log::error!("Disconnected");
+                Err(NeutronError::Disconnected)
             }
         }
     }
-}
 
-#[cfg(feature = "json")]
-#[async_trait]
-impl<T: DeserializeOwned> PulsarConsumerNext<T> for Consumer {
-    async fn next(&self) -> Result<Message<T>, PulsarConsumerError> {
-        loop {
-            let msg = self.client.next_message().await.map_err(|_| {
-                PulsarConsumerError::PulsarError("Failed to receive message".to_string())
-            })?;
-            if let ClientInbound::Message {
-                message_id,
-                payload,
-            } = msg
-            {
-                let payload = serde_json::from_slice(&payload).map_err(|_| {
-                    PulsarConsumerError::DeserializationError(
-                        "Failed to deserialize message".to_string(),
-                    )
-                })?;
-                return Ok(Message::<T> {
-                    message_id,
-                    payload,
-                });
-            }
+    pub async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
+        let outbound = Outbound::Client(ClientOutbound::Ack(vec![Ack {
+            consumer_id: self.config.consumer_id,
+            request_id: message_id.ledgerId() + message_id.entryId(),
+            message_id: message_id.clone(),
+        }]));
+        if let Some(client_engine_connection) = &self.client_engine_connection {
+            let _ = client_engine_connection.send(Ok(outbound)).await?;
         }
+        Ok(())
     }
 }
