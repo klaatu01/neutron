@@ -8,6 +8,8 @@ pub enum NeutronError {
     ChannelTerminated,
     Unresolvable,
     Io,
+    DeserializationFailed,
+    SerializationFailed,
 }
 
 impl NeutronError {
@@ -31,6 +33,8 @@ impl std::fmt::Display for NeutronError {
             NeutronError::ChannelTerminated => write!(f, "Channel terminated"),
             NeutronError::Unresolvable => write!(f, "Unresolvable"),
             NeutronError::Io => write!(f, "IO error"),
+            NeutronError::DeserializationFailed => write!(f, "Deserialization failed"),
+            NeutronError::SerializationFailed => write!(f, "Serialization failed"),
         }
     }
 }

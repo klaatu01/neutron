@@ -1,13 +1,10 @@
+use crate::codec::Codec;
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
-use crate::message::{Codec, Inbound, Message, Outbound};
+use crate::message::{Inbound, Message, Outbound};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
-use tokio::io::{ReadHalf, WriteHalf};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 
 type ResultInbound = Result<Inbound, NeutronError>;

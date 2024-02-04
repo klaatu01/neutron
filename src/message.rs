@@ -10,7 +10,7 @@ use protobuf::{Message as _, MessageField};
 
 use self::proto::pulsar::{AuthData, BaseCommand, MessageIdData, MessageMetadata};
 use crate::{
-    error::NeutronError,
+    codec::Payload,
     resolver_manager::{Resolvable, ResolverKey},
 };
 
@@ -371,6 +371,10 @@ pub enum ClientInbound {
     Success {
         request_id: u64,
     },
+    AckResponse {
+        consumer_id: u64,
+        request_id: u64,
+    },
 }
 
 impl Resolvable for ClientInbound {
@@ -383,6 +387,7 @@ impl Resolvable for ClientInbound {
             } => Some(format!("{producer_id}:{sequence_id}")),
             ClientInbound::LookupTopic { request_id, .. } => Some(format!("LOOKUP:{request_id}")),
             ClientInbound::Success { request_id } => Some(format!("SUCCESS:{request_id}")),
+            ClientInbound::AckResponse { request_id, .. } => Some(format!("ACK:{request_id}")),
         }
     }
 }
@@ -422,6 +427,18 @@ impl TryFrom<&Message> for ClientInbound {
                 let request_id = success.request_id();
                 Ok(ClientInbound::Success { request_id })
             }
+            proto::pulsar::base_command::Type::ACK_RESPONSE => {
+                let ack = &message.command.ackResponse;
+                let consumer_id = ack.consumer_id();
+                let request_id = ack.request_id();
+                if ack.has_error() {
+                    println!("Error: {:?}", ack.error());
+                }
+                Ok(ClientInbound::AckResponse {
+                    consumer_id,
+                    request_id,
+                })
+            }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Unsupported command",
@@ -442,8 +459,16 @@ impl ClientInbound {
             ClientInbound::Message { .. } => proto::pulsar::base_command::Type::MESSAGE,
             ClientInbound::LookupTopic { .. } => proto::pulsar::base_command::Type::LOOKUP_RESPONSE,
             ClientInbound::Success { .. } => proto::pulsar::base_command::Type::SUCCESS,
+            ClientInbound::AckResponse { .. } => proto::pulsar::base_command::Type::ACK_RESPONSE,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Ack {
+    pub consumer_id: u64,
+    pub message_id: MessageIdData,
+    pub request_id: u64,
 }
 
 #[allow(dead_code)]
@@ -455,7 +480,7 @@ pub enum ClientOutbound {
         message_id: MessageIdData,
         payload: Vec<u8>,
     },
-    Ack(Vec<MessageIdData>),
+    Ack(Vec<Ack>),
     Ping,
     Pong,
     CloseProducer,
@@ -488,6 +513,10 @@ impl Resolvable for ClientOutbound {
             } => Some(format!("{producer_id}:{sequence_id}")),
             ClientOutbound::LookupTopic { request_id, .. } => Some(format!("LOOKUP:{request_id}")),
             ClientOutbound::Subscribe { request_id, .. } => Some(format!("SUCCESS:{request_id}")),
+            ClientOutbound::Ack(acks) => {
+                let ack = acks.first().unwrap();
+                Some(format!("ACK:{}", ack.request_id))
+            }
             _ => None,
         }
     }
@@ -512,17 +541,19 @@ impl Into<Message> for ClientOutbound {
                 base.set_type(proto::pulsar::base_command::Type::SEND.into());
                 base
             }
-            ClientOutbound::Ack(message_ids) => {
+            ClientOutbound::Ack(acks) => {
                 let mut ack = proto::pulsar::CommandAck::new();
                 ack.set_consumer_id(0);
 
-                if message_ids.len() > 1 {
+                if acks.len() > 1 {
                     ack.set_ack_type(proto::pulsar::command_ack::AckType::Cumulative);
                 } else {
                     ack.set_ack_type(proto::pulsar::command_ack::AckType::Individual);
                 }
 
-                ack.message_id = message_ids.clone();
+                ack.message_id = acks.iter().map(|id| id.message_id.clone()).collect();
+                ack.request_id = acks.first().unwrap().request_id.into();
+
                 let mut base = proto::pulsar::BaseCommand::new();
                 base.ack = MessageField::some(ack);
                 base.set_type(proto::pulsar::base_command::Type::ACK.into());
@@ -639,207 +670,13 @@ impl Into<Outbound> for ClientOutbound {
     }
 }
 
-impl TryFrom<&[u8]> for Message {
-    type Error = std::io::Error;
-    fn try_from(bytes: &[u8]) -> Result<Message, Self::Error> {
-        let (bytes, command) = command_frame(bytes).unwrap();
-
-        let (bytes, payload) = match bytes.is_empty() {
-            false => payload_frame(bytes)
-                .map(|(bytes, p)| (bytes, Some(p)))
-                .unwrap_or((bytes, None)),
-            true => (bytes, None),
-        };
-
-        let command = BaseCommand::parse_from_bytes(command.command).unwrap();
-
-        let payload = payload.map(|p| Payload {
-            metadata: MessageMetadata::parse_from_bytes(p.metadata).unwrap(),
-            data: bytes[p.metadata_size as usize..].to_vec(),
-        });
-
-        Ok(Message { command, payload })
-    }
-}
-
-impl TryFrom<Vec<u8>> for Message {
-    type Error = std::io::Error;
-    fn try_from(bytes: Vec<u8>) -> Result<Message, Self::Error> {
-        bytes.as_slice().try_into()
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Message {
-    type Error = std::io::Error;
-    fn try_from(bytes: &Vec<u8>) -> Result<Message, Self::Error> {
-        bytes.as_slice().try_into()
-    }
-}
-
-impl Into<Vec<u8>> for Message {
-    fn into(self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        let command_bytes = self.command.write_to_bytes().unwrap();
-        let command_size = self.command.compute_size() as u32;
-        let header_size = if self.payload.is_some() { 18 } else { 8 };
-        let metadata_size = self
-            .payload
-            .as_ref()
-            .map_or(0, |p| p.metadata.compute_size() as u32);
-        let payload_size = self.payload.as_ref().map_or(0, |p| p.data.len() as u32);
-        let total_size = command_size + metadata_size + payload_size + header_size - 4;
-
-        buf.put_u32(total_size);
-        buf.put_u32(command_size);
-        buf.put_slice(&command_bytes);
-
-        self.payload.map(|payload| {
-            let payload_bytes: Vec<u8> = payload.into();
-            buf.put_slice(&payload_bytes);
-        });
-
-        buf
-    }
-}
-
-impl Into<Vec<u8>> for Payload {
-    fn into(self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.put_u16(0x0e01);
-        buf.put_u32(0);
-        buf.put_u32(self.metadata.compute_size() as u32);
-        buf.put_slice(&self.metadata.write_to_bytes().unwrap());
-        buf.put_slice(&self.data);
-        let checksum = crc32c::crc32c(&buf[6..]);
-        buf[2..6].copy_from_slice(&checksum.to_be_bytes());
-        buf
-    }
-}
-
-struct CommandFrame<'a> {
-    #[allow(dead_code)]
-    pub(crate) total_size: u32,
-    #[allow(dead_code)]
-    command_size: u32,
-    command: &'a [u8],
-}
-
-fn command_frame(bytes: &[u8]) -> IResult<&[u8], CommandFrame> {
-    let (bytes, total_size) = be_u32::<_, nom::error::Error<&[u8]>>(bytes).unwrap();
-    let (bytes, command_size) = be_u32::<_, nom::error::Error<&[u8]>>(bytes).unwrap();
-    let (bytes, command) = take::<_, _, nom::error::Error<&[u8]>>(command_size)(bytes).unwrap();
-    Ok((
-        bytes,
-        CommandFrame {
-            total_size,
-            command_size,
-            command,
-        },
-    ))
-}
-
-struct PayloadFrame<'a> {
-    #[allow(dead_code)]
-    magic_number: u16,
-    #[allow(dead_code)]
-    checksum: u32,
-    #[allow(dead_code)]
-    metadata_size: u32,
-    metadata: &'a [u8],
-}
-
-fn payload_frame(bytes: &[u8]) -> IResult<&[u8], PayloadFrame> {
-    let (bytes, magic_number) = be_u16(bytes)?;
-    let (bytes, checksum) = be_u32(bytes)?;
-    let (bytes, metadata_size) = be_u32(bytes)?;
-    let (bytes, metadata) = take(metadata_size)(bytes)?;
-    Ok((
-        bytes,
-        PayloadFrame {
-            magic_number,
-            checksum,
-            metadata_size,
-            metadata,
-        },
-    ))
-}
-
-pub struct Codec;
-
-impl From<std::io::Error> for NeutronError {
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn from(err: std::io::Error) -> Self {
-        NeutronError::Io
-    }
-}
-
-impl tokio_util::codec::Encoder<Message> for Codec {
-    type Error = NeutronError;
-    fn encode(&mut self, item: Message, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        let bytes: Vec<u8> = item.into();
-        dst.extend_from_slice(bytes.as_slice());
-        Ok(())
-    }
-}
-
-impl tokio_util::codec::Decoder for Codec {
-    type Item = Message;
-    type Error = NeutronError;
-
-    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < 4 {
-            return Ok(None);
-        }
-        let mut buf = Cursor::new(src);
-        let message_size = buf.get_u32() as usize + 4;
-        let src = buf.into_inner();
-        if src.len() >= message_size {
-            let (bytes, command_frame) = command_frame(&src[..message_size]).unwrap();
-            let command = BaseCommand::parse_from_bytes(command_frame.command).unwrap();
-
-            let (bytes, payload_frame) = match bytes.is_empty() {
-                false => payload_frame(bytes)
-                    .map(|(bytes, p)| (bytes, Some(p)))
-                    .map_err(|e| e)
-                    .unwrap_or((bytes, None)),
-                true => (bytes, None),
-            };
-
-            let payload = payload_frame.as_ref().map(|p| {
-                let metadata = MessageMetadata::parse_from_bytes(p.metadata).unwrap();
-                Payload {
-                    metadata,
-                    data: bytes[8..].to_vec(),
-                }
-            });
-
-            src.advance(message_size as usize);
-
-            let message = Message { command, payload };
-
-            Ok(Some(message))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Payload {
-    /// message metadata added by Pulsar
-    pub metadata: MessageMetadata,
-    /// raw message data
-    pub data: Vec<u8>,
-}
-
 #[cfg(test)]
 mod test {
+    use crate::codec::Codec;
+    use crate::message::Message;
     use bytes::BytesMut;
     use protobuf::{Enum, MessageField};
     use tokio_util::codec::{Decoder, Encoder};
-
-    use super::{proto::pulsar::MessageIdData, Codec};
-    use crate::message::Message;
 
     #[test]
     fn parse_payload_command() {
@@ -863,9 +700,6 @@ mod test {
             assert_eq!(payload.metadata.sequence_id(), 8);
             assert_eq!(payload.metadata.publish_time(), 1533850624062);
         }
-
-        let output: Vec<u8> = message.into();
-        assert_eq!(output.as_slice(), input);
     }
 
     #[test]

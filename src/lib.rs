@@ -1,8 +1,8 @@
 mod auth;
 mod client;
+mod codec;
 mod connection;
 mod consumer;
-mod consumer_engine;
 mod engine;
 mod error;
 mod message;

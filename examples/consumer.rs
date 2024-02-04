@@ -1,7 +1,6 @@
 #[derive(Debug)]
 #[allow(dead_code)]
 struct Data {
-    id: u64,
     name: String,
 }
 
@@ -10,7 +9,6 @@ impl TryFrom<Vec<u8>> for Data {
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Ok(Data {
-            id: 0,
             name: String::from_utf8(value).unwrap(),
         })
     }
@@ -35,8 +33,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect()
         .await?;
 
-    for x in 0..1001 {
-        let next = consumer.next().await?;
+    for x in 0..10000 {
+        println!("Waiting for message {}", x);
+        let next: neutron::Message<Data> = consumer.next().await?;
+        println!("Got message {}", x);
+        consumer.ack(&next.message_id).await?;
+        println!("Acked message {}", x);
+        println!("{}", next.payload.name);
     }
 
     Ok(())
