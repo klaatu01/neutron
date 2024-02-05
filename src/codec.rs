@@ -56,8 +56,6 @@ fn payload_frame(bytes: &[u8]) -> IResult<&[u8], PayloadFrame> {
     let (bytes, checksum) = be_u32(bytes)?;
     let (bytes, metadata_size) = be_u32(bytes)?;
     let (bytes, metadata) = take(metadata_size)(bytes)?;
-    let (bytes, amount_until_payload) = be_u32(bytes)?;
-    let (bytes, _) = take(amount_until_payload)(bytes)?;
     Ok((
         bytes,
         PayloadFrame {
@@ -95,16 +93,21 @@ impl tokio_util::codec::Encoder<Message> for Codec {
         buf.put_slice(&command_bytes);
 
         item.payload.map(|payload| {
-            buf.put_u16(0x0e01);
-            buf.put_u32(0);
-            buf.put_u32(payload.metadata.compute_size() as u32);
-            buf.put_slice(&payload.metadata.write_to_bytes().unwrap());
-            buf.put_slice(&payload.data);
-            let checksum = crc32c::crc32c(&buf[6..]);
-            buf[2..6].copy_from_slice(&checksum.to_be_bytes());
+            let mut payload_buf = Vec::new();
+            payload_buf.put_u16(0x0e01);
+            payload_buf.put_u32(0);
+            payload_buf.put_u32(payload.metadata.compute_size() as u32);
+            payload_buf.put_slice(&payload.metadata.write_to_bytes().unwrap());
+            payload_buf.put_slice(&payload.data);
+            let checksum = crc32c::crc32c(&payload_buf[6..]);
+            payload_buf[2..6].copy_from_slice(&checksum.to_be_bytes());
+            buf.put_slice(&payload_buf);
         });
 
-        dst.extend_from_slice(&buf);
+        if dst.remaining_mut() < buf.len() {
+            dst.reserve(buf.len());
+        }
+        dst.put_slice(&buf);
         Ok(())
     }
 }

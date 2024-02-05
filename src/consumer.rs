@@ -161,7 +161,6 @@ impl Consumer {
         })
     }
 
-    // if the count of message permits is half the max off of the message permits, then send a flow command and reset current message permits to 0
     async fn check_and_flow(&self) -> Result<(), NeutronError> {
         {
             let mut current_message_permits = self.current_message_permits.write().await;
@@ -174,50 +173,54 @@ impl Consumer {
         Ok(())
     }
 
+    async fn next_inbound(&self) -> Result<Inbound, NeutronError> {
+        let mut inbound_buffer = self.inbound_buffer.lock().await;
+        if let Some(inbound) = inbound_buffer.pop() {
+            Ok(inbound)
+        } else {
+            match &self.client_engine_connection {
+                Some(client_engine_connection) => {
+                    let inbound = client_engine_connection.recv().await?;
+                    Ok(inbound)
+                }
+                None => Err(NeutronError::Disconnected),
+            }
+        }
+    }
+
+    async fn increment_message_permit_count(&self) {
+        let mut current_message_permits = self.current_message_permits.write().await;
+        *current_message_permits += 1;
+    }
+
     pub async fn next<T>(&self) -> Result<Message<T>, NeutronError>
     where
         T: TryFrom<Vec<u8>>,
     {
-        match &self.client_engine_connection {
-            Some(engine_connection) => loop {
-                self.check_and_flow().await?;
-                let mut inbound_buffer = self.inbound_buffer.lock().await;
-                let inbound = if let Some(inbound) = inbound_buffer.pop() {
-                    Ok(inbound)
-                } else {
-                    engine_connection.recv().await
-                };
-                match inbound {
-                    Ok(inbound) => {
-                        if let Inbound::Client(ClientInbound::Message {
-                            payload,
-                            message_id,
-                            ..
-                        }) = &inbound
-                        {
-                            {
-                                let mut current_message_permits =
-                                    self.current_message_permits.write().await;
-                                *current_message_permits += 1;
-                            }
-                            return T::try_from(payload.clone())
-                                .map(|payload| Message {
-                                    payload,
-                                    message_id: message_id.clone(),
-                                })
-                                .map_err(|_| NeutronError::DeserializationFailed);
-                        };
-                        continue;
-                    }
-                    Err(e) => {
-                        log::warn!("{}", e);
-                        return Err(e);
-                    }
+        loop {
+            self.check_and_flow().await?;
+            match self.next_inbound().await {
+                Ok(inbound) => {
+                    if let Inbound::Client(ClientInbound::Message {
+                        payload,
+                        message_id,
+                        ..
+                    }) = &inbound
+                    {
+                        self.increment_message_permit_count().await;
+                        return T::try_from(payload.clone())
+                            .map(|payload| Message {
+                                payload,
+                                message_id: message_id.clone(),
+                            })
+                            .map_err(|_| NeutronError::DeserializationFailed);
+                    };
+                    continue;
                 }
-            },
-            None => {
-                log::error!("Disconnected");
-                Err(NeutronError::Disconnected)
+                Err(e) => {
+                    log::warn!("{}", e);
+                    return Err(e);
+                }
             }
         }
     }

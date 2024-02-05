@@ -33,13 +33,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect()
         .await?;
 
-    for x in 0..10000 {
-        println!("Waiting for message {}", x);
+    loop {
         let next: neutron::Message<Data> = consumer.next().await?;
-        println!("Got message {}", x);
+        log::info!("{}", next.payload.name);
         consumer.ack(&next.message_id).await?;
-        println!("Acked message {}", x);
-        println!("{}", next.payload.name);
+        log::info!("Acked. ");
     }
 
     Ok(())
