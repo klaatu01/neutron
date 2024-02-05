@@ -20,13 +20,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoint_port: 6650,
     };
 
-    let consumer_config = neutron::ProducerConfig {
+    let producer_config = neutron::ProducerConfig {
         producer_id: 0,
         topic: "test".to_string(),
         producer_name: Some("test-producer".to_string()),
     };
 
-    let producer = neutron::Producer::new(pulsar_config, consumer_config)
+    let producer = neutron::Producer::new(pulsar_config, producer_config)
         .connect()
         .await?;
 
