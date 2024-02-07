@@ -17,6 +17,12 @@ impl TryFrom<Vec<u8>> for Data {
     }
 }
 
+impl Into<Vec<u8>> for Data {
+    fn into(self) -> Vec<u8> {
+        self.name.as_bytes().to_vec()
+    }
+}
+
 pub struct PayloadLoggerPlugin;
 pub struct AutoAckPlugin;
 
@@ -65,38 +71,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&pulsar_manager)
         .await;
 
-    let consumer_2 = ConsumerBuilder::new()
+    let producer = neutron::ProducerBuilder::new()
+        .with_producer_name("test")
         .with_topic("test")
-        .with_subscription("test")
-        .with_consumer_name("test")
-        .add_plugin(PayloadLoggerPlugin)
-        .add_plugin(AutoAckPlugin)
-        .connect(&pulsar_manager)
-        .await;
-
-    let consumer_3 = ConsumerBuilder::new()
-        .with_topic("test")
-        .with_subscription("test")
-        .with_consumer_name("test")
-        .add_plugin(PayloadLoggerPlugin)
-        .add_plugin(AutoAckPlugin)
-        .connect(&pulsar_manager)
-        .await;
-
-    let consumer_4 = ConsumerBuilder::new()
-        .with_topic("test")
-        .with_subscription("test")
-        .with_consumer_name("test")
-        .add_plugin(PayloadLoggerPlugin)
-        .add_plugin(AutoAckPlugin)
         .connect(&pulsar_manager)
         .await;
 
     loop {
+        producer
+            .send(Data {
+                name: "Hello, world!".to_string(),
+            })
+            .await?;
         let _: neutron::Message<Data> = consumer.next().await.unwrap();
-        let _: neutron::Message<Data> = consumer_2.next().await.unwrap();
-        let _: neutron::Message<Data> = consumer_3.next().await.unwrap();
-        let _: neutron::Message<Data> = consumer_4.next().await.unwrap();
     }
 
     Ok(())

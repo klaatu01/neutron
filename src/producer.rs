@@ -6,7 +6,7 @@ use crate::{
         proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
     },
     resolver_manager::ResolverManager,
-    PulsarConfig,
+    PulsarConfig, PulsarManager,
 };
 use futures::lock::Mutex;
 #[cfg(feature = "json")]
@@ -29,7 +29,6 @@ type ResultOutbound = Result<Outbound, NeutronError>;
 #[allow(dead_code)]
 pub struct Producer {
     pub(crate) config: RwLock<ProducerConfig>,
-    pulsar_config: PulsarConfig,
     client_engine_connection: EngineConnection<Outbound, Inbound>,
     resolver_manager: ResolverManager<Inbound>,
     inbound_buffer: Mutex<Vec<Inbound>>,
@@ -123,7 +122,7 @@ impl Producer {
         }
     }
 
-    pub async fn connect(self) -> Result<(), NeutronError> {
+    pub async fn connect(&self) -> Result<(), NeutronError> {
         self.lookup_topic(&self.client_engine_connection).await?;
         self.register(&self.client_engine_connection).await?;
         Ok(())
@@ -157,5 +156,67 @@ impl Producer {
         self.send_and_resolve(&self.client_engine_connection, &Ok(outbound))
             .await?;
         Ok(())
+    }
+}
+
+pub struct ProducerBuilder {
+    producer_name: Option<String>,
+    topic: Option<String>,
+    producer_id: Option<u64>,
+    client_connection: Option<EngineConnection<Outbound, Inbound>>,
+}
+
+impl ProducerBuilder {
+    pub fn new() -> Self {
+        Self {
+            producer_name: None,
+            topic: None,
+            producer_id: None,
+            client_connection: None,
+        }
+    }
+
+    pub fn with_producer_name(mut self, producer_name: &str) -> Self {
+        self.producer_name = Some(producer_name.to_string());
+        self
+    }
+
+    pub fn with_topic(mut self, topic: &str) -> Self {
+        self.topic = Some(topic.to_string());
+        self
+    }
+
+    pub fn with_producer_id(mut self, producer_id: u64) -> Self {
+        self.producer_id = Some(producer_id);
+        self
+    }
+
+    pub async fn connect(self, pulsar_manager: &PulsarManager) -> Producer {
+        let producer_name = self.producer_name.unwrap();
+        let topic = self.topic.unwrap();
+        let producer_id = self.producer_id.unwrap_or(0);
+        let producer_config = ProducerConfig {
+            producer_name: Some(producer_name),
+            producer_id,
+            topic,
+        };
+
+        let client_engine_connection = pulsar_manager
+            .register_producer(&producer_config)
+            .await
+            .unwrap();
+
+        let producer = Producer {
+            config: RwLock::new(producer_config),
+            client_engine_connection,
+            resolver_manager: ResolverManager::new(),
+            inbound_buffer: Mutex::new(Vec::new()),
+            sequence_id: AtomicU64::new(0),
+            request_id: AtomicU64::new(0),
+        };
+
+        producer.connect().await.unwrap();
+
+        producer
     }
 }

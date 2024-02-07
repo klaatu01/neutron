@@ -3,7 +3,7 @@ use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
 use crate::message::{ConnectionInbound, ConnectionOutbound, EngineOutbound, Inbound, Outbound};
 use crate::resolver_manager::ResolverManager;
-use crate::{Consumer, ConsumerConfig, Producer};
+use crate::{Consumer, ConsumerConfig, Producer, ProducerConfig};
 use futures::lock::Mutex;
 use futures::FutureExt;
 
@@ -340,13 +340,11 @@ impl PulsarManager {
 
     pub async fn register_producer(
         &self,
-        producer: &Producer,
+        config: &ProducerConfig,
     ) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
         let (tx, _rx) = async_channel::unbounded::<ResultInbound>();
         let (_tx, rx) = async_channel::unbounded::<ResultOutbound>();
         let connection = EngineConnection::new(tx, rx);
-
-        let config = producer.config.read().await;
 
         self.inner_connection
             .send(Ok(PulsarManagerRegistration::Producer {
