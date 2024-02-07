@@ -6,8 +6,9 @@ use crate::{
         proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
     },
     resolver_manager::ResolverManager,
-    PulsarConfig,
+    Pulsar, PulsarConfig, PulsarManager,
 };
+use async_trait::async_trait;
 use futures::lock::Mutex;
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
@@ -27,6 +28,7 @@ pub struct ConsumerConfig {
 type ResultInbound = Result<Inbound, NeutronError>;
 type ResultOutbound = Result<Outbound, NeutronError>;
 
+#[derive(Debug, Clone)]
 pub struct Message<T>
 where
     T: TryFrom<Vec<u8>>,
@@ -37,28 +39,16 @@ where
 
 #[allow(dead_code)]
 pub struct Consumer {
-    config: ConsumerConfig,
-    pulsar_config: PulsarConfig,
-    client_engine_connection: Option<EngineConnection<Outbound, Inbound>>,
+    pub(crate) config: ConsumerConfig,
+    client_engine_connection: EngineConnection<Outbound, Inbound>,
     resolver_manager: ResolverManager<Inbound>,
     inbound_buffer: Mutex<Vec<Inbound>>,
     message_permits: u32,
     current_message_permits: RwLock<u32>,
+    plugins: Mutex<Vec<Box<dyn ConsumerPlugin + Send + Sync>>>,
 }
 
 impl Consumer {
-    pub fn new(pulsar_config: PulsarConfig, consumer_config: ConsumerConfig) -> Self {
-        Self {
-            config: consumer_config,
-            pulsar_config,
-            client_engine_connection: None,
-            resolver_manager: ResolverManager::new(),
-            inbound_buffer: Mutex::new(Vec::new()),
-            message_permits: 20,
-            current_message_permits: RwLock::new(0),
-        }
-    }
-
     pub async fn send_and_resolve(
         &self,
         socket_connection: &EngineConnection<Outbound, Inbound>,
@@ -143,30 +133,18 @@ impl Consumer {
         Ok(())
     }
 
-    pub async fn connect(self) -> Result<Self, NeutronError> {
-        let client_engine_connection = crate::Pulsar::new(self.pulsar_config.clone()).run().await;
-
-        self.lookup_topic(&client_engine_connection).await?;
-        self.subscribe(&client_engine_connection).await?;
-        self.flow(&client_engine_connection).await?;
-
-        Ok(Consumer {
-            config: self.config,
-            pulsar_config: self.pulsar_config,
-            client_engine_connection: Some(client_engine_connection),
-            resolver_manager: self.resolver_manager,
-            inbound_buffer: Mutex::new(Vec::new()),
-            message_permits: self.message_permits,
-            current_message_permits: RwLock::new(0),
-        })
+    pub async fn connect(&self) -> Result<(), NeutronError> {
+        self.lookup_topic(&self.client_engine_connection).await?;
+        self.subscribe(&self.client_engine_connection).await?;
+        self.flow(&self.client_engine_connection).await?;
+        Ok(())
     }
 
     async fn check_and_flow(&self) -> Result<(), NeutronError> {
         {
             let mut current_message_permits = self.current_message_permits.write().await;
             if *current_message_permits >= self.message_permits {
-                let client_engine_connection = self.client_engine_connection.as_ref().unwrap();
-                self.flow(client_engine_connection).await?;
+                self.flow(&self.client_engine_connection).await?;
                 *current_message_permits = 0;
             }
         }
@@ -178,13 +156,8 @@ impl Consumer {
         if let Some(inbound) = inbound_buffer.pop() {
             Ok(inbound)
         } else {
-            match &self.client_engine_connection {
-                Some(client_engine_connection) => {
-                    let inbound = client_engine_connection.recv().await?;
-                    Ok(inbound)
-                }
-                None => Err(NeutronError::Disconnected),
-            }
+            let inbound = self.client_engine_connection.recv().await?;
+            Ok(inbound)
         }
     }
 
@@ -208,6 +181,11 @@ impl Consumer {
                     }) = &inbound
                     {
                         self.increment_message_permit_count().await;
+                        self.on_message(Message {
+                            payload: payload.clone(),
+                            message_id: message_id.clone(),
+                        })
+                        .await?;
                         return T::try_from(payload.clone())
                             .map(|payload| Message {
                                 payload,
@@ -225,15 +203,141 @@ impl Consumer {
         }
     }
 
+    pub async fn on_message(&self, message: Message<Vec<u8>>) -> Result<(), NeutronError> {
+        let plugins = self.plugins.lock().await;
+        for plugin in plugins.iter() {
+            plugin.on_message(self, message.clone()).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn register_plugin<T>(&self, plugin: T)
+    where
+        T: ConsumerPlugin + Send + Sync + 'static,
+    {
+        let mut plugins = self.plugins.lock().await;
+        plugins.push(Box::new(plugin));
+        log::info!("Plugin registered");
+    }
+
     pub async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
         let outbound = Outbound::Client(ClientOutbound::Ack(vec![Ack {
             consumer_id: self.config.consumer_id,
             request_id: message_id.ledgerId() + message_id.entryId(),
             message_id: message_id.clone(),
         }]));
-        if let Some(client_engine_connection) = &self.client_engine_connection {
-            let _ = client_engine_connection.send(Ok(outbound)).await?;
-        }
+        let _ = &self.client_engine_connection.send(Ok(outbound)).await?;
         Ok(())
+    }
+
+    pub async fn start(&self) -> Result<(), NeutronError> {
+        loop {
+            let inbound = &self.client_engine_connection.recv().await?;
+            match inbound {
+                Inbound::Client(ClientInbound::Message {
+                    payload,
+                    message_id,
+                    ..
+                }) => {
+                    self.on_message(Message {
+                        payload: payload.clone(),
+                        message_id: message_id.clone(),
+                    })
+                    .await?;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[async_trait]
+pub trait ConsumerPlugin {
+    async fn on_connect(&self, consumer: &Consumer) -> Result<(), NeutronError> {
+        Ok(())
+    }
+    async fn on_disconnect(&self, consumer: &Consumer) -> Result<(), NeutronError> {
+        Ok(())
+    }
+    async fn on_message(
+        &self,
+        consumer: &Consumer,
+        message: Message<Vec<u8>>,
+    ) -> Result<(), NeutronError> {
+        Ok(())
+    }
+}
+
+pub struct ConsumerBuilder {
+    plugins: Vec<Box<dyn ConsumerPlugin + Send + Sync>>,
+    consumer_name: Option<String>,
+    topic: Option<String>,
+    subscription: Option<String>,
+    client_connection: Option<EngineConnection<Outbound, Inbound>>,
+}
+
+impl ConsumerBuilder {
+    pub fn new() -> Self {
+        Self {
+            plugins: Vec::new(),
+            consumer_name: None,
+            topic: None,
+            subscription: None,
+            client_connection: None,
+        }
+    }
+
+    pub fn with_consumer_name(mut self, consumer_name: &str) -> Self {
+        self.consumer_name = Some(consumer_name.to_string());
+        self
+    }
+
+    pub fn with_topic(mut self, topic: &str) -> Self {
+        self.topic = Some(topic.to_string());
+        self
+    }
+
+    pub fn with_subscription(mut self, subscription: &str) -> Self {
+        self.subscription = Some(subscription.to_string());
+        self
+    }
+
+    pub fn add_plugin<T>(mut self, plugin: T) -> Self
+    where
+        T: ConsumerPlugin + Send + Sync + 'static,
+    {
+        self.plugins.push(Box::new(plugin));
+        self
+    }
+
+    pub async fn connect(self, pulsar_manager: &PulsarManager) -> Consumer {
+        let consumer_name = self.consumer_name.unwrap();
+        let topic = self.topic.unwrap();
+        let subscription = self.subscription.unwrap();
+        let consumer_config = ConsumerConfig {
+            consumer_name,
+            consumer_id: 0,
+            topic,
+            subscription,
+        };
+
+        let client_engine_connection = pulsar_manager
+            .register_consumer(&consumer_config)
+            .await
+            .unwrap();
+
+        let consumer = Consumer {
+            config: consumer_config,
+            client_engine_connection,
+            resolver_manager: ResolverManager::new(),
+            inbound_buffer: Mutex::new(Vec::new()),
+            message_permits: 20,
+            current_message_permits: RwLock::new(0),
+            plugins: self.plugins.into(),
+        };
+
+        consumer.connect().await.unwrap();
+
+        consumer
     }
 }

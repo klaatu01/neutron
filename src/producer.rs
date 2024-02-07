@@ -28,9 +28,9 @@ type ResultOutbound = Result<Outbound, NeutronError>;
 
 #[allow(dead_code)]
 pub struct Producer {
-    config: RwLock<ProducerConfig>,
+    pub(crate) config: RwLock<ProducerConfig>,
     pulsar_config: PulsarConfig,
-    client_engine_connection: Option<EngineConnection<Outbound, Inbound>>,
+    client_engine_connection: EngineConnection<Outbound, Inbound>,
     resolver_manager: ResolverManager<Inbound>,
     inbound_buffer: Mutex<Vec<Inbound>>,
     sequence_id: AtomicU64,
@@ -38,18 +38,6 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn new(pulsar_config: PulsarConfig, producer_config: ProducerConfig) -> Self {
-        Self {
-            config: RwLock::new(producer_config),
-            pulsar_config,
-            client_engine_connection: None,
-            resolver_manager: ResolverManager::new(),
-            inbound_buffer: Mutex::new(Vec::new()),
-            sequence_id: AtomicU64::new(0),
-            request_id: AtomicU64::new(0),
-        }
-    }
-
     pub async fn send_and_resolve(
         &self,
         socket_connection: &EngineConnection<Outbound, Inbound>,
@@ -135,19 +123,10 @@ impl Producer {
         }
     }
 
-    pub async fn connect(self) -> Result<Self, NeutronError> {
-        let client_engine_connection = crate::Pulsar::new(self.pulsar_config.clone()).run().await;
-        self.lookup_topic(&client_engine_connection).await?;
-        self.register(&client_engine_connection).await?;
-        Ok(Producer {
-            config: self.config,
-            pulsar_config: self.pulsar_config,
-            client_engine_connection: Some(client_engine_connection),
-            resolver_manager: self.resolver_manager,
-            inbound_buffer: Mutex::new(Vec::new()),
-            sequence_id: AtomicU64::new(0),
-            request_id: AtomicU64::new(0),
-        })
+    pub async fn connect(self) -> Result<(), NeutronError> {
+        self.lookup_topic(&self.client_engine_connection).await?;
+        self.register(&self.client_engine_connection).await?;
+        Ok(())
     }
 
     async fn next_inbound(&self) -> Result<Inbound, NeutronError> {
@@ -155,13 +134,8 @@ impl Producer {
         if let Some(inbound) = inbound_buffer.pop() {
             Ok(inbound)
         } else {
-            match &self.client_engine_connection {
-                Some(client_engine_connection) => {
-                    let inbound = client_engine_connection.recv().await?;
-                    Ok(inbound)
-                }
-                None => Err(NeutronError::Disconnected),
-            }
+            let inbound = self.client_engine_connection.recv().await?;
+            Ok(inbound)
         }
     }
 
@@ -169,24 +143,19 @@ impl Producer {
     where
         T: Into<Vec<u8>>,
     {
-        match &self.client_engine_connection {
-            Some(client_engine_connection) => {
-                let outbound = {
-                    let config = self.config.read().await;
-                    Outbound::Client(ClientOutbound::Send {
-                        producer_name: config.producer_name.clone().unwrap(),
-                        producer_id: config.producer_id,
-                        sequence_id: self
-                            .sequence_id
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-                        payload: message.into(),
-                    })
-                };
-                self.send_and_resolve(client_engine_connection, &Ok(outbound))
-                    .await?;
-                Ok(())
-            }
-            None => Err(NeutronError::Disconnected),
-        }
+        let outbound = {
+            let config = self.config.read().await;
+            Outbound::Client(ClientOutbound::Send {
+                producer_name: config.producer_name.clone().unwrap(),
+                producer_id: config.producer_id,
+                sequence_id: self
+                    .sequence_id
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                payload: message.into(),
+            })
+        };
+        self.send_and_resolve(&self.client_engine_connection, &Ok(outbound))
+            .await?;
+        Ok(())
     }
 }

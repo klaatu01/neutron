@@ -12,4 +12,5 @@ mod resolver_manager;
 pub use auth::*;
 pub use client::*;
 pub use consumer::*;
+pub use error::*;
 pub use producer::*;
