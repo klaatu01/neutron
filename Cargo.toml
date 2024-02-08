@@ -22,6 +22,7 @@ log = "0.4.20"
 env_logger = "0.11.1"
 tokio-util = { version = "0.7.10", features = ["codec"] }
 chrono = "0.4.33"
+oauth2 = "4.4.2"
 
 [build-dependencies]
 protobuf-codegen = "3.3.0"

@@ -1,9 +1,11 @@
 use crate::connection::PulsarConnection;
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
-use crate::message::{ConnectionInbound, ConnectionOutbound, EngineOutbound, Inbound, Outbound};
+use crate::message::{
+    ConnectionInbound, ConnectionOutbound, EngineInbound, EngineOutbound, Inbound, Outbound,
+};
 use crate::resolver_manager::ResolverManager;
-use crate::{Consumer, ConsumerConfig, Producer, ProducerConfig};
+use crate::{AuthenticationPlugin, ConsumerConfig, ProducerConfig};
 use futures::lock::Mutex;
 use futures::FutureExt;
 
@@ -22,6 +24,7 @@ pub struct Pulsar {
     pub(crate) inbound_buffer: Mutex<Vec<Inbound>>,
     pub(crate) registration_manager_connection:
         Option<EngineConnection<(), PulsarManagerRegistration>>,
+    pub(crate) auth_plugin: Option<Box<dyn AuthenticationPlugin + Sync + Send + 'static>>,
 }
 
 type ResultInbound = Result<Inbound, NeutronError>;
@@ -43,6 +46,7 @@ impl Pulsar {
             client_connection: Mutex::new(Vec::new()),
             inbound_buffer: Mutex::new(Vec::new()),
             registration_manager_connection: None,
+            auth_plugin: None,
         }
     }
 
@@ -101,6 +105,20 @@ impl Pulsar {
                         .await
                         .unwrap();
                 }
+                Inbound::Engine(EngineInbound::AuthChallenge) => {
+                    if let Some(auth_plugin) = &self.auth_plugin {
+                        let auth_data = auth_plugin.auth_data().await?;
+                        socket_connection
+                            .send(Ok(Outbound::Engine(EngineOutbound::AuthChallenge {
+                                auth_data,
+                            })))
+                            .await?;
+                    } else {
+                        Err(NeutronError::AuthenticationFailed(
+                            "No auth plugin provided, but auth challenge received".to_string(),
+                        ))?;
+                    }
+                }
                 inbound => {
                     for client_connection in client_connections {
                         client_connection
@@ -151,11 +169,16 @@ impl Pulsar {
                 .await
                 .run()
                 .await;
+        let auth_data = if let Some(auth_plugin) = &self.auth_plugin {
+            Some(auth_plugin.auth_data().await?)
+        } else {
+            None
+        };
         let _ = self
             .send_and_resolve(
                 &connection_engine,
                 &Ok(Outbound::Engine(crate::message::EngineOutbound::Connect {
-                    auth_data: None,
+                    auth_data,
                 })),
             )
             .await;
@@ -203,7 +226,6 @@ impl Pulsar {
                     inbound = socket_connection.recv() => {
                         if is_disconnect(&inbound) {
                             log::debug!("Connection engine disconnected");
-                            //client_connection.send(Err(NeutronError::Disconnected)).await.unwrap();
                             return true;
                         }
                         self.handle_socket_connection_inbound(&client_connections, &socket_connection, &inbound).await.unwrap();
@@ -307,6 +329,45 @@ impl PulsarManagerRegistration {
         match self {
             PulsarManagerRegistration::Producer { connection, .. } => connection,
             PulsarManagerRegistration::Consumer { connection, .. } => connection,
+        }
+    }
+}
+
+pub struct PulsarBuilder {
+    config: Option<PulsarConfig>,
+    auth_plugin: Option<Box<dyn AuthenticationPlugin + Send + Sync + 'static>>,
+}
+
+impl PulsarBuilder {
+    pub fn new() -> Self {
+        Self {
+            config: None,
+            auth_plugin: None,
+        }
+    }
+
+    pub fn with_config(mut self, config: PulsarConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    pub fn with_auth_plugin<T>(mut self, auth_plugin: T) -> Self
+    where
+        T: AuthenticationPlugin + Send + Sync + 'static,
+    {
+        self.auth_plugin = Some(Box::new(auth_plugin));
+        self
+    }
+
+    pub fn build(self) -> Pulsar {
+        Pulsar {
+            config: self.config.unwrap(),
+            socket_connection: None,
+            resolver_manager: ResolverManager::new(),
+            client_connection: Mutex::new(Vec::new()),
+            inbound_buffer: Mutex::new(Vec::new()),
+            registration_manager_connection: None,
+            auth_plugin: self.auth_plugin,
         }
     }
 }

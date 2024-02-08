@@ -93,10 +93,11 @@ impl Consumer {
     async fn flow(
         &self,
         client_engine_connection: &EngineConnection<Outbound, Inbound>,
+        permits: u32,
     ) -> Result<(), NeutronError> {
         let outbound = Outbound::Client(ClientOutbound::Flow {
             consumer_id: self.config.consumer_id,
-            message_permits: self.message_permits,
+            message_permits: permits,
         });
         let _ = client_engine_connection.send(Ok(outbound)).await?;
         Ok(())
@@ -136,7 +137,8 @@ impl Consumer {
     pub async fn connect(&self) -> Result<(), NeutronError> {
         self.lookup_topic(&self.client_engine_connection).await?;
         self.subscribe(&self.client_engine_connection).await?;
-        self.flow(&self.client_engine_connection).await?;
+        self.flow(&self.client_engine_connection, self.message_permits * 2)
+            .await?;
         Ok(())
     }
 
@@ -144,7 +146,8 @@ impl Consumer {
         {
             let mut current_message_permits = self.current_message_permits.write().await;
             if *current_message_permits >= self.message_permits {
-                self.flow(&self.client_engine_connection).await?;
+                self.flow(&self.client_engine_connection, self.message_permits)
+                    .await?;
                 *current_message_permits = 0;
             }
         }
@@ -239,23 +242,26 @@ impl Consumer {
             request_id: message_id.ledgerId() + message_id.entryId(),
             message_id: message_id.clone(),
         }]));
-        let _ = &self.client_engine_connection.send(Ok(outbound)).await?;
+        let _ = self
+            .send_and_resolve(&self.client_engine_connection, &Ok(outbound))
+            .await?;
         Ok(())
     }
 
     pub async fn start(&self) -> Result<(), NeutronError> {
         loop {
-            let inbound = &self.client_engine_connection.recv().await?;
+            self.check_and_flow().await?;
+            let inbound = self.next_inbound().await?;
             match inbound {
                 Inbound::Client(ClientInbound::Message {
                     payload,
                     message_id,
                     ..
                 }) => {
-                    self.on_message(Message {
-                        payload: payload.clone(),
-                        message_id: message_id.clone(),
-                    })
+                    self.handle_client_inbound_message::<Vec<u8>>(
+                        payload.clone(),
+                        message_id.clone(),
+                    )
                     .await?;
                 }
                 _ => {}
@@ -344,7 +350,7 @@ impl ConsumerBuilder {
             client_engine_connection,
             resolver_manager: ResolverManager::new(),
             inbound_buffer: Mutex::new(Vec::new()),
-            message_permits: 20,
+            message_permits: 250,
             current_message_permits: RwLock::new(0),
             plugins: self.plugins.into(),
         };

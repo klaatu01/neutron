@@ -34,7 +34,7 @@ impl ConsumerPlugin for PayloadLoggerPlugin {
         message: neutron::Message<Vec<u8>>,
     ) -> Result<(), NeutronError> {
         let data = Data::try_from(message.payload.clone())
-            .map_err(|e| NeutronError::DeserializationFailed)?;
+            .map_err(|_| NeutronError::DeserializationFailed)?;
         log::info!("From plugin: {}", data.name);
         Ok(())
     }
@@ -60,7 +60,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoint_port: 6650,
     };
 
-    let pulsar_manager = neutron::Pulsar::new(pulsar_config).run();
+    let pulsar = neutron::PulsarBuilder::new()
+        .with_config(pulsar_config)
+        .build()
+        .run();
 
     let consumer = ConsumerBuilder::new()
         .with_topic("test")
@@ -68,23 +71,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_consumer_name("test")
         .add_plugin(PayloadLoggerPlugin)
         .add_plugin(AutoAckPlugin)
-        .connect(&pulsar_manager)
+        .connect(&pulsar)
         .await;
 
     let producer = neutron::ProducerBuilder::new()
         .with_producer_name("test")
         .with_topic("test")
-        .connect(&pulsar_manager)
+        .connect(&pulsar)
         .await;
 
-    loop {
-        producer
-            .send(Data {
-                name: "Hello, world!".to_string(),
-            })
-            .await?;
-        let _: neutron::Message<Data> = consumer.next().await.unwrap();
-    }
-
+    consumer.start().await.unwrap();
     Ok(())
 }
