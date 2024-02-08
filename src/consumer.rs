@@ -166,6 +166,28 @@ impl Consumer {
         *current_message_permits += 1;
     }
 
+    async fn handle_client_inbound_message<T>(
+        &self,
+        payload: Vec<u8>,
+        message_id: MessageIdData,
+    ) -> Result<Message<T>, NeutronError>
+    where
+        T: TryFrom<Vec<u8>>,
+    {
+        self.increment_message_permit_count().await;
+        self.on_message(Message {
+            payload: payload.clone(),
+            message_id: message_id.clone(),
+        })
+        .await?;
+        T::try_from(payload.clone())
+            .map(|payload| Message {
+                payload,
+                message_id: message_id.clone(),
+            })
+            .map_err(|_| NeutronError::DeserializationFailed)
+    }
+
     pub async fn next<T>(&self) -> Result<Message<T>, NeutronError>
     where
         T: TryFrom<Vec<u8>>,
@@ -178,20 +200,11 @@ impl Consumer {
                         payload,
                         message_id,
                         ..
-                    }) = &inbound
+                    }) = inbound
                     {
-                        self.increment_message_permit_count().await;
-                        self.on_message(Message {
-                            payload: payload.clone(),
-                            message_id: message_id.clone(),
-                        })
-                        .await?;
-                        return T::try_from(payload.clone())
-                            .map(|payload| Message {
-                                payload,
-                                message_id: message_id.clone(),
-                            })
-                            .map_err(|_| NeutronError::DeserializationFailed);
+                        return self
+                            .handle_client_inbound_message::<T>(payload, message_id)
+                            .await;
                     };
                     continue;
                 }
