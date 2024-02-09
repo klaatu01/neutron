@@ -1,3 +1,6 @@
+use async_trait::async_trait;
+use neutron::{ConsumerBuilder, ConsumerPlugin, NeutronError};
+
 #[derive(Debug)]
 #[allow(dead_code)]
 struct Data {
@@ -14,6 +17,41 @@ impl TryFrom<Vec<u8>> for Data {
     }
 }
 
+impl Into<Vec<u8>> for Data {
+    fn into(self) -> Vec<u8> {
+        self.name.as_bytes().to_vec()
+    }
+}
+
+pub struct PayloadLoggerPlugin;
+pub struct AutoAckPlugin;
+
+#[async_trait]
+impl ConsumerPlugin for PayloadLoggerPlugin {
+    async fn on_message(
+        &self,
+        _: &neutron::Consumer,
+        message: neutron::Message<Vec<u8>>,
+    ) -> Result<(), NeutronError> {
+        let data = Data::try_from(message.payload.clone())
+            .map_err(|_| NeutronError::DeserializationFailed)?;
+        log::info!("From plugin: {}", data.name);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ConsumerPlugin for AutoAckPlugin {
+    async fn on_message(
+        &self,
+        consumer: &neutron::Consumer,
+        message: neutron::Message<Vec<u8>>,
+    ) -> Result<(), NeutronError> {
+        consumer.ack(&message.message_id).await?;
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -22,23 +60,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoint_port: 6650,
     };
 
-    let consumer_config = neutron::ConsumerConfig {
-        consumer_id: 0,
-        topic: "test".to_string(),
-        subscription: "test".to_string(),
-        consumer_name: "test".to_string(),
-    };
+    let pulsar = neutron::PulsarBuilder::new()
+        .with_config(pulsar_config)
+        .build()
+        .run();
 
-    let consumer = neutron::Consumer::new(pulsar_config, consumer_config)
-        .connect()
-        .await?;
+    let consumer = ConsumerBuilder::new()
+        .with_topic("test")
+        .with_subscription("test")
+        .with_consumer_name("test")
+        .add_plugin(PayloadLoggerPlugin)
+        .add_plugin(AutoAckPlugin)
+        .connect(&pulsar)
+        .await;
 
-    loop {
-        let next: neutron::Message<Data> = consumer.next().await?;
-        log::info!("{}", next.payload.name);
-        consumer.ack(&next.message_id).await?;
-        log::info!("Acked. ");
-    }
+    let producer = neutron::ProducerBuilder::new()
+        .with_producer_name("test")
+        .with_topic("test")
+        .connect(&pulsar)
+        .await;
 
+    consumer.start().await.unwrap();
     Ok(())
 }

@@ -1,19 +1,10 @@
-use std::io::Cursor;
-
-use bytes::{Buf, BufMut};
-use chrono::Utc;
-use nom::{
-    bytes::streaming::take,
-    number::streaming::{be_u16, be_u32},
-    IResult,
-};
-use protobuf::{Message as _, MessageField};
-
 use self::proto::pulsar::{AuthData, BaseCommand, MessageIdData, MessageMetadata};
 use crate::{
     codec::Payload,
     resolver_manager::{Resolvable, ResolverKey},
 };
+use chrono::Utc;
+use protobuf::MessageField;
 
 pub mod proto {
     #![allow(clippy::all)]
@@ -237,6 +228,7 @@ impl Resolvable for ConnectionOutbound {
 #[derive(Debug, Clone)]
 pub enum EngineOutbound {
     Connect { auth_data: Option<Vec<u8>> },
+    AuthChallenge { auth_data: Vec<u8> },
 }
 
 impl Into<Message> for EngineOutbound {
@@ -260,6 +252,19 @@ impl Into<Message> for EngineOutbound {
                     payload: None,
                 }
             }
+            EngineOutbound::AuthChallenge { auth_data } => {
+                let mut auth_challenge = proto::pulsar::CommandAuthResponse::new();
+                let mut auth_data_payload = AuthData::new();
+                auth_data_payload.set_auth_data(auth_data);
+                auth_challenge.response = MessageField::some(auth_data_payload);
+                let mut base = proto::pulsar::BaseCommand::new();
+                base.authResponse = MessageField::some(auth_challenge);
+                base.set_type(proto::pulsar::base_command::Type::AUTH_RESPONSE.into());
+                Message {
+                    command: base,
+                    payload: None,
+                }
+            }
         }
     }
 }
@@ -274,6 +279,9 @@ impl EngineOutbound {
     pub fn base_command(&self) -> proto::pulsar::base_command::Type {
         match self {
             EngineOutbound::Connect { .. } => proto::pulsar::base_command::Type::CONNECT,
+            EngineOutbound::AuthChallenge { .. } => {
+                proto::pulsar::base_command::Type::AUTH_RESPONSE
+            }
         }
     }
 }
@@ -282,6 +290,7 @@ impl Resolvable for EngineOutbound {
     fn resolver_id(&self) -> Option<ResolverKey> {
         match self {
             EngineOutbound::Connect { .. } => Some("CONNECT".to_string()),
+            _ => None,
         }
     }
 }
@@ -814,7 +823,6 @@ mod test {
         };
         let mut buf = BytesMut::new();
         Codec.encode(input, &mut buf).unwrap();
-
         let decoded = Codec.decode(&mut buf.into()).unwrap();
     }
 

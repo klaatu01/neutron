@@ -10,6 +10,7 @@ pub enum NeutronError {
     Io,
     DeserializationFailed,
     SerializationFailed,
+    AuthenticationFailed(String),
 }
 
 impl NeutronError {
@@ -35,6 +36,7 @@ impl std::fmt::Display for NeutronError {
             NeutronError::Io => write!(f, "IO error"),
             NeutronError::DeserializationFailed => write!(f, "Deserialization failed"),
             NeutronError::SerializationFailed => write!(f, "Serialization failed"),
+            NeutronError::AuthenticationFailed(e) => write!(f, "Authentication failed: {}", e),
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::{
         proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
     },
     resolver_manager::ResolverManager,
-    PulsarConfig,
+    PulsarConfig, PulsarManager,
 };
 use futures::lock::Mutex;
 #[cfg(feature = "json")]
@@ -28,9 +28,8 @@ type ResultOutbound = Result<Outbound, NeutronError>;
 
 #[allow(dead_code)]
 pub struct Producer {
-    config: RwLock<ProducerConfig>,
-    pulsar_config: PulsarConfig,
-    client_engine_connection: Option<EngineConnection<Outbound, Inbound>>,
+    pub(crate) config: RwLock<ProducerConfig>,
+    client_engine_connection: EngineConnection<Outbound, Inbound>,
     resolver_manager: ResolverManager<Inbound>,
     inbound_buffer: Mutex<Vec<Inbound>>,
     sequence_id: AtomicU64,
@@ -38,18 +37,6 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn new(pulsar_config: PulsarConfig, producer_config: ProducerConfig) -> Self {
-        Self {
-            config: RwLock::new(producer_config),
-            pulsar_config,
-            client_engine_connection: None,
-            resolver_manager: ResolverManager::new(),
-            inbound_buffer: Mutex::new(Vec::new()),
-            sequence_id: AtomicU64::new(0),
-            request_id: AtomicU64::new(0),
-        }
-    }
-
     pub async fn send_and_resolve(
         &self,
         socket_connection: &EngineConnection<Outbound, Inbound>,
@@ -135,19 +122,10 @@ impl Producer {
         }
     }
 
-    pub async fn connect(self) -> Result<Self, NeutronError> {
-        let client_engine_connection = crate::Pulsar::new(self.pulsar_config.clone()).run().await;
-        self.lookup_topic(&client_engine_connection).await?;
-        self.register(&client_engine_connection).await?;
-        Ok(Producer {
-            config: self.config,
-            pulsar_config: self.pulsar_config,
-            client_engine_connection: Some(client_engine_connection),
-            resolver_manager: self.resolver_manager,
-            inbound_buffer: Mutex::new(Vec::new()),
-            sequence_id: AtomicU64::new(0),
-            request_id: AtomicU64::new(0),
-        })
+    pub async fn connect(&self) -> Result<(), NeutronError> {
+        self.lookup_topic(&self.client_engine_connection).await?;
+        self.register(&self.client_engine_connection).await?;
+        Ok(())
     }
 
     async fn next_inbound(&self) -> Result<Inbound, NeutronError> {
@@ -155,13 +133,8 @@ impl Producer {
         if let Some(inbound) = inbound_buffer.pop() {
             Ok(inbound)
         } else {
-            match &self.client_engine_connection {
-                Some(client_engine_connection) => {
-                    let inbound = client_engine_connection.recv().await?;
-                    Ok(inbound)
-                }
-                None => Err(NeutronError::Disconnected),
-            }
+            let inbound = self.client_engine_connection.recv().await?;
+            Ok(inbound)
         }
     }
 
@@ -169,24 +142,81 @@ impl Producer {
     where
         T: Into<Vec<u8>>,
     {
-        match &self.client_engine_connection {
-            Some(client_engine_connection) => {
-                let outbound = {
-                    let config = self.config.read().await;
-                    Outbound::Client(ClientOutbound::Send {
-                        producer_name: config.producer_name.clone().unwrap(),
-                        producer_id: config.producer_id,
-                        sequence_id: self
-                            .sequence_id
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-                        payload: message.into(),
-                    })
-                };
-                self.send_and_resolve(client_engine_connection, &Ok(outbound))
-                    .await?;
-                Ok(())
-            }
-            None => Err(NeutronError::Disconnected),
+        let outbound = {
+            let config = self.config.read().await;
+            Outbound::Client(ClientOutbound::Send {
+                producer_name: config.producer_name.clone().unwrap(),
+                producer_id: config.producer_id,
+                sequence_id: self
+                    .sequence_id
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                payload: message.into(),
+            })
+        };
+        self.send_and_resolve(&self.client_engine_connection, &Ok(outbound))
+            .await?;
+        Ok(())
+    }
+}
+
+pub struct ProducerBuilder {
+    producer_name: Option<String>,
+    topic: Option<String>,
+    producer_id: Option<u64>,
+    client_connection: Option<EngineConnection<Outbound, Inbound>>,
+}
+
+impl ProducerBuilder {
+    pub fn new() -> Self {
+        Self {
+            producer_name: None,
+            topic: None,
+            producer_id: None,
+            client_connection: None,
         }
+    }
+
+    pub fn with_producer_name(mut self, producer_name: &str) -> Self {
+        self.producer_name = Some(producer_name.to_string());
+        self
+    }
+
+    pub fn with_topic(mut self, topic: &str) -> Self {
+        self.topic = Some(topic.to_string());
+        self
+    }
+
+    pub fn with_producer_id(mut self, producer_id: u64) -> Self {
+        self.producer_id = Some(producer_id);
+        self
+    }
+
+    pub async fn connect(self, pulsar_manager: &PulsarManager) -> Producer {
+        let producer_name = self.producer_name.unwrap();
+        let topic = self.topic.unwrap();
+        let producer_id = self.producer_id.unwrap_or(0);
+        let producer_config = ProducerConfig {
+            producer_name: Some(producer_name),
+            producer_id,
+            topic,
+        };
+
+        let client_engine_connection = pulsar_manager
+            .register_producer(&producer_config)
+            .await
+            .unwrap();
+
+        let producer = Producer {
+            config: RwLock::new(producer_config),
+            client_engine_connection,
+            resolver_manager: ResolverManager::new(),
+            inbound_buffer: Mutex::new(Vec::new()),
+            sequence_id: AtomicU64::new(0),
+            request_id: AtomicU64::new(0),
+        };
+
+        producer.connect().await.unwrap();
+
+        producer
     }
 }
