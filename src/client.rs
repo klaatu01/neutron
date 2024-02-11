@@ -165,8 +165,8 @@ impl Pulsar {
 
     pub async fn connect(&self) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
         let connection_engine =
-            PulsarConnection::connect(&self.config.endpoint_url, &self.config.endpoint_port)
-                .await
+            PulsarConnection::connect(&self.config.endpoint_url, &self.config.endpoint_port, false)
+                .await?
                 .run()
                 .await;
         let auth_data = if let Some(auth_plugin) = &self.auth_plugin {
