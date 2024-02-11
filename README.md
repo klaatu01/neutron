@@ -10,10 +10,15 @@ Neutron is built with a focus on:
 ## Features:
 
 [x] Consumer Client 📥
+
 [x] Producer Client 📤
+
 [x] Plugin Support 🔌
+
 [x] Multi/Dual Consumer & Producer Support 🤝
+
 [x] TLS Support via [rustls](https://github.com/rustls/rustls). 🔐
+
 [] Automatic Reconnection ♻️
 
 ## Installation
