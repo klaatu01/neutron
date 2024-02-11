@@ -97,3 +97,63 @@ impl<T: Resolvable + Clone + Send + 'static> ResolverManager<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct TestResolver {
+        id: String,
+    }
+
+    impl Resolvable for TestResolver {
+        fn resolver_id(&self) -> Option<ResolverKey> {
+            Some(self.id.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolver_manager() {
+        let manager = ResolverManager::new();
+        let resolver = TestResolver {
+            id: "test".to_string(),
+        };
+        let rx = manager.put_resolver(&resolver).await.unwrap();
+        let resolver = TestResolver {
+            id: "test".to_string(),
+        };
+        assert!(manager.try_resolve(&resolver).await);
+        assert_eq!(rx.recv().await.unwrap().id, "test");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_resolver_managers() {
+        let manager: ResolverManager<TestResolver> = ResolverManager::new();
+        let mut resolvers = Vec::new();
+        for i in 0..10000 {
+            let resolver = TestResolver {
+                id: format!("test{}", i),
+            };
+            let rx = manager.put_resolver(&resolver).await.unwrap();
+            resolvers.push(rx);
+        }
+
+        let resolvers = futures::future::join_all(
+            resolvers
+                .into_iter()
+                .map(|rx| async move { rx.recv().await }),
+        );
+
+        tokio::join!(resolvers, async {
+            for i in 0..10000 {
+                let resolver = TestResolver {
+                    id: format!("test{}", i),
+                };
+                assert!(manager.try_resolve(&resolver).await);
+            }
+        });
+
+        assert!(true);
+    }
+}

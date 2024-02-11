@@ -37,8 +37,8 @@ pub struct ConsumerConfig {
     pub subscription: String,
 }
 
-type ResultInbound = Result<Inbound, NeutronError>;
-type ResultOutbound = Result<Outbound, NeutronError>;
+pub(crate) type ResultInbound = Result<Inbound, NeutronError>;
+pub(crate) type ResultOutbound = Result<Outbound, NeutronError>;
 
 #[derive(Debug, Clone)]
 pub struct Message<T>
@@ -55,12 +55,12 @@ where
     T: ConsumerDataTrait,
 {
     pub(crate) config: ConsumerConfig,
-    client_engine_connection: EngineConnection<Outbound, Inbound>,
-    resolver_manager: ResolverManager<Inbound>,
-    inbound_buffer: Mutex<Vec<Inbound>>,
-    message_permits: u32,
-    current_message_permits: RwLock<u32>,
-    plugins: Mutex<Vec<Box<dyn ConsumerPlugin<T> + Send + Sync>>>,
+    pub(crate) client_engine_connection: EngineConnection<Outbound, Inbound>,
+    pub(crate) resolver_manager: ResolverManager<Inbound>,
+    pub(crate) inbound_buffer: Mutex<Vec<Inbound>>,
+    pub(crate) message_permits: u32,
+    pub(crate) current_message_permits: RwLock<u32>,
+    pub(crate) plugins: Mutex<Vec<Box<dyn ConsumerPlugin<T> + Send + Sync>>>,
 }
 
 impl<T> Consumer<T>
@@ -378,5 +378,274 @@ where
 
         consumer.connect().await?;
         Ok(consumer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use futures::lock::Mutex;
+    use tokio::sync::RwLock;
+
+    use crate::{
+        engine::EngineConnection,
+        message::{proto::pulsar::MessageIdData, ClientInbound, ClientOutbound, Inbound, Outbound},
+        resolver_manager::ResolverManager,
+        Consumer, ConsumerPlugin, NeutronError,
+    };
+
+    #[derive(Debug, Clone)]
+    struct TestConsumerData {
+        pub data: String,
+    }
+
+    impl TryFrom<Vec<u8>> for TestConsumerData {
+        type Error = NeutronError;
+
+        fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+            Ok(TestConsumerData {
+                data: String::from_utf8(value).map_err(|_| NeutronError::DeserializationFailed)?,
+            })
+        }
+    }
+
+    impl Into<Vec<u8>> for TestConsumerData {
+        fn into(self) -> Vec<u8> {
+            self.data.into_bytes()
+        }
+    }
+
+    #[tokio::test]
+    async fn consumer_connect_test() {
+        let (client_engine_connection, consumer_connection) =
+            EngineConnection::<Outbound, Inbound>::pair();
+        let consumer_message_permits = 250;
+        let consumer: Consumer<TestConsumerData> = Consumer {
+            config: crate::ConsumerConfig {
+                consumer_name: "test".to_string(),
+                consumer_id: 0,
+                topic: "test".to_string(),
+                subscription: "test".to_string(),
+            },
+            client_engine_connection,
+            resolver_manager: ResolverManager::new(),
+            inbound_buffer: Mutex::new(Vec::new()),
+            message_permits: consumer_message_permits.clone(),
+            current_message_permits: RwLock::new(0),
+            plugins: Mutex::new(Vec::new()),
+        };
+        let mock_server = async move {
+            loop {
+                let outbound = consumer_connection.recv().await.unwrap();
+                match outbound {
+                    Outbound::Client(crate::message::ClientOutbound::LookupTopic {
+                        request_id,
+                        ..
+                    }) => {
+                        let _ = consumer_connection
+                            .send(Ok(Inbound::Client(
+                                crate::message::ClientInbound::LookupTopic {
+                                    request_id,
+                                    broker_service_url_tls: "test".to_string(),
+                                    broker_service_url: "test".to_string(),
+                                    response: crate::message::proto::pulsar::command_lookup_topic_response::LookupType::Connect,
+                                    authoritative: true
+                                },
+                            )))
+                            .await;
+                    }
+                    Outbound::Client(crate::message::ClientOutbound::Subscribe {
+                        request_id,
+                        ..
+                    }) => {
+                        let _ = consumer_connection
+                            .send(Ok(Inbound::Client(
+                                crate::message::ClientInbound::Success { request_id },
+                            )))
+                            .await;
+                    }
+                    Outbound::Client(crate::message::ClientOutbound::Flow {
+                        message_permits,
+                        ..
+                    }) => {
+                        assert!(message_permits == consumer_message_permits * 2);
+                        return Ok(());
+                    }
+                    _ => return Err(NeutronError::UnsupportedCommand),
+                }
+            }
+        };
+        let (consumer_connect_result, mock_server_result) =
+            tokio::join!(consumer.connect(), mock_server);
+        assert!(consumer_connect_result.is_ok());
+        assert!(mock_server_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn can_handle_disconnect() {
+        let (client_engine_connection, consumer_connection) =
+            EngineConnection::<Outbound, Inbound>::pair();
+        let consumer_message_permits = 250;
+        let consumer: Consumer<TestConsumerData> = Consumer {
+            config: crate::ConsumerConfig {
+                consumer_name: "test".to_string(),
+                consumer_id: 0,
+                topic: "test".to_string(),
+                subscription: "test".to_string(),
+            },
+            client_engine_connection,
+            resolver_manager: ResolverManager::new(),
+            inbound_buffer: Mutex::new(Vec::new()),
+            message_permits: consumer_message_permits.clone(),
+            current_message_permits: RwLock::new(0),
+            plugins: Mutex::new(Vec::new()),
+        };
+        consumer_connection
+            .send(Err(NeutronError::Disconnected))
+            .await
+            .unwrap();
+        let output = consumer.start().await;
+        assert!(output.is_err());
+        match output {
+            Err(NeutronError::Disconnected) => assert!(true),
+            _ => assert!(false),
+        }
+    }
+
+    struct AutoAckPlugin;
+
+    #[async_trait]
+    impl ConsumerPlugin<TestConsumerData> for AutoAckPlugin {
+        async fn on_message(
+            &mut self,
+            consumer: &Consumer<TestConsumerData>,
+            message: super::Message<TestConsumerData>,
+        ) -> Result<(), NeutronError> {
+            consumer.ack(&message.message_id).await?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn consumer_test() {
+        let (client_engine_connection, consumer_connection) =
+            EngineConnection::<Outbound, Inbound>::pair();
+        let consumer_message_permits = 500;
+        let consumer: Consumer<TestConsumerData> = Consumer {
+            config: crate::ConsumerConfig {
+                consumer_name: "test".to_string(),
+                consumer_id: 0,
+                topic: "test".to_string(),
+                subscription: "test".to_string(),
+            },
+            client_engine_connection,
+            resolver_manager: ResolverManager::new(),
+            inbound_buffer: Mutex::new(Vec::new()),
+            message_permits: consumer_message_permits.clone(),
+            current_message_permits: RwLock::new(0),
+            plugins: Mutex::new(vec![Box::new(AutoAckPlugin)]),
+        };
+        let mock_server = async move {
+            loop {
+                let outbound = consumer_connection.recv().await.unwrap();
+                match outbound {
+                    Outbound::Client(crate::message::ClientOutbound::LookupTopic {
+                        request_id,
+                        ..
+                    }) => {
+                        let _ = consumer_connection
+                            .send(Ok(Inbound::Client(
+                                crate::message::ClientInbound::LookupTopic {
+                                    request_id,
+                                    broker_service_url_tls: "test".to_string(),
+                                    broker_service_url: "test".to_string(),
+                                    response: crate::message::proto::pulsar::command_lookup_topic_response::LookupType::Connect,
+                                    authoritative: true
+                                },
+                            )))
+                            .await;
+                    }
+                    Outbound::Client(crate::message::ClientOutbound::Subscribe {
+                        request_id,
+                        ..
+                    }) => {
+                        let _ = consumer_connection
+                            .send(Ok(Inbound::Client(
+                                crate::message::ClientInbound::Success { request_id },
+                            )))
+                            .await;
+                    }
+                    Outbound::Client(crate::message::ClientOutbound::Flow {
+                        message_permits,
+                        ..
+                    }) => {
+                        assert!(message_permits == consumer_message_permits * 2);
+                        break;
+                    }
+                    _ => return Err(NeutronError::UnsupportedCommand),
+                }
+            }
+            for x in 0..10000 {
+                let _ = consumer_connection
+                    .send(Ok(Inbound::Client(
+                        crate::message::ClientInbound::Message {
+                            producer_id: 0,
+                            sequence_id: x,
+                            message_id: MessageIdData::default(),
+                            payload: TestConsumerData {
+                                data: "hello_world".to_string(),
+                            }
+                            .into(),
+                        },
+                    )))
+                    .await;
+            }
+            let mut count = 0;
+            loop {
+                let outbound = consumer_connection.recv().await.unwrap();
+                match outbound {
+                    Outbound::Client(ClientOutbound::Ack(ack)) => {
+                        let first = ack.first().cloned().unwrap();
+                        consumer_connection
+                            .send(Ok(Inbound::Client(ClientInbound::AckResponse {
+                                consumer_id: first.consumer_id,
+                                request_id: first.request_id,
+                            })))
+                            .await
+                            .unwrap();
+                        count += 1;
+                        if count == 10000 {
+                            consumer_connection
+                                .send(Err(NeutronError::Disconnected))
+                                .await
+                                .unwrap();
+                            return Ok(());
+                        }
+                    }
+                    Outbound::Client(crate::message::ClientOutbound::Flow {
+                        message_permits,
+                        ..
+                    }) => {
+                        continue;
+                    }
+                    _ => {
+                        return Err(NeutronError::UnsupportedCommand);
+                    }
+                }
+            }
+        };
+        let (consumer_start_result, mock_server_result) = tokio::join!(
+            async {
+                let result = consumer.connect().await;
+                assert!(result.is_ok());
+                consumer.start().await
+            },
+            mock_server
+        );
+        match consumer_start_result {
+            Err(NeutronError::ChannelTerminated) => assert!(true),
+            _ => assert!(false),
+        }
+        assert!(mock_server_result.is_ok());
     }
 }

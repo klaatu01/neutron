@@ -19,6 +19,18 @@ impl<Input, Output> EngineConnection<Input, Output> {
     ) -> Self {
         Self { tx, rx }
     }
+
+    pub fn pair() -> (
+        EngineConnection<Input, Output>,
+        EngineConnection<Output, Input>,
+    ) {
+        let (tx1, rx1) = async_channel::unbounded();
+        let (tx2, rx2) = async_channel::unbounded();
+        (
+            EngineConnection::new(tx1, rx2),
+            EngineConnection::new(tx2, rx1),
+        )
+    }
 }
 
 impl<Input, Output> EngineConnection<Input, Output> {
