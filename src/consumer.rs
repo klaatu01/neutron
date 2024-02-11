@@ -1,12 +1,10 @@
-use std::sync::atomic::AtomicU64;
-
 use crate::{
-    engine::{Engine, EngineConnection},
+    engine::EngineConnection,
     message::{
         proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
     },
     resolver_manager::ResolverManager,
-    Pulsar, PulsarConfig, PulsarManager,
+    PulsarManager,
 };
 use async_trait::async_trait;
 use futures::lock::Mutex;
@@ -16,6 +14,20 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::error::NeutronError;
+
+#[cfg(feature = "json")]
+pub trait ConsumerDataTrait: DeserializeOwned + Send + Sync + Clone {}
+
+#[cfg(not(feature = "json"))]
+pub trait ConsumerDataTrait: TryFrom<Vec<u8>> + Send + Sync + Clone {}
+
+// Implement the trait for all types that satisfy the trait bounds.
+// This is a simplified example; for real-world usage, you might need to adjust it.
+#[cfg(feature = "json")]
+impl<T: DeserializeOwned + Send + Sync + Clone> ConsumerDataTrait for T {}
+
+#[cfg(not(feature = "json"))]
+impl<T: TryFrom<Vec<u8>> + Send + Sync + Clone> ConsumerDataTrait for T {}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConsumerConfig {
@@ -31,24 +43,30 @@ type ResultOutbound = Result<Outbound, NeutronError>;
 #[derive(Debug, Clone)]
 pub struct Message<T>
 where
-    T: TryFrom<Vec<u8>>,
+    T: ConsumerDataTrait,
 {
     pub payload: T,
     pub message_id: MessageIdData,
 }
 
 #[allow(dead_code)]
-pub struct Consumer {
+pub struct Consumer<T>
+where
+    T: ConsumerDataTrait,
+{
     pub(crate) config: ConsumerConfig,
     client_engine_connection: EngineConnection<Outbound, Inbound>,
     resolver_manager: ResolverManager<Inbound>,
     inbound_buffer: Mutex<Vec<Inbound>>,
     message_permits: u32,
     current_message_permits: RwLock<u32>,
-    plugins: Mutex<Vec<Box<dyn ConsumerPlugin + Send + Sync>>>,
+    plugins: Mutex<Vec<Box<dyn ConsumerPlugin<T> + Send + Sync>>>,
 }
 
-impl Consumer {
+impl<T> Consumer<T>
+where
+    T: ConsumerDataTrait,
+{
     pub async fn send_and_resolve(
         &self,
         socket_connection: &EngineConnection<Outbound, Inbound>,
@@ -169,32 +187,30 @@ impl Consumer {
         *current_message_permits += 1;
     }
 
-    async fn handle_client_inbound_message<T>(
+    async fn handle_client_inbound_message(
         &self,
         payload: Vec<u8>,
         message_id: MessageIdData,
-    ) -> Result<Message<T>, NeutronError>
-    where
-        T: TryFrom<Vec<u8>>,
-    {
+    ) -> Result<Message<T>, NeutronError> {
         self.increment_message_permit_count().await;
-        self.on_message(Message {
-            payload: payload.clone(),
+        #[cfg(feature = "json")]
+        let message: Message<T> = Message {
+            payload: serde_json::from_slice(&payload)
+                .map_err(|_| NeutronError::DeserializationFailed)?,
             message_id: message_id.clone(),
-        })
-        .await?;
-        T::try_from(payload.clone())
-            .map(|payload| Message {
-                payload,
-                message_id: message_id.clone(),
-            })
-            .map_err(|_| NeutronError::DeserializationFailed)
+        };
+        #[cfg(not(feature = "json"))]
+        let message: Message<T> = Message {
+            payload: payload
+                .try_into()
+                .map_err(|_| NeutronError::DeserializationFailed)?,
+            message_id: message_id.clone(),
+        };
+        self.on_message(message.clone()).await?;
+        Ok(message)
     }
 
-    pub async fn next<T>(&self) -> Result<Message<T>, NeutronError>
-    where
-        T: TryFrom<Vec<u8>>,
-    {
+    pub async fn next_message(&self) -> Result<Message<T>, NeutronError> {
         loop {
             self.check_and_flow().await?;
             match self.next_inbound().await {
@@ -206,7 +222,7 @@ impl Consumer {
                     }) = inbound
                     {
                         return self
-                            .handle_client_inbound_message::<T>(payload, message_id)
+                            .handle_client_inbound_message(payload, message_id)
                             .await;
                     };
                     continue;
@@ -219,17 +235,17 @@ impl Consumer {
         }
     }
 
-    pub async fn on_message(&self, message: Message<Vec<u8>>) -> Result<(), NeutronError> {
-        let plugins = self.plugins.lock().await;
-        for plugin in plugins.iter() {
+    pub async fn on_message(&self, message: Message<T>) -> Result<(), NeutronError> {
+        let mut plugins = self.plugins.lock().await;
+        for plugin in plugins.iter_mut() {
             plugin.on_message(self, message.clone()).await?;
         }
         Ok(())
     }
 
-    pub async fn register_plugin<T>(&self, plugin: T)
+    pub async fn register_plugin<Plugin>(&self, plugin: Plugin)
     where
-        T: ConsumerPlugin + Send + Sync + 'static,
+        Plugin: ConsumerPlugin<T> + Send + Sync + 'static,
     {
         let mut plugins = self.plugins.lock().await;
         plugins.push(Box::new(plugin));
@@ -258,11 +274,8 @@ impl Consumer {
                     message_id,
                     ..
                 }) => {
-                    self.handle_client_inbound_message::<Vec<u8>>(
-                        payload.clone(),
-                        message_id.clone(),
-                    )
-                    .await?;
+                    self.handle_client_inbound_message(payload.clone(), message_id.clone())
+                        .await?;
                 }
                 _ => {}
             }
@@ -270,39 +283,47 @@ impl Consumer {
     }
 }
 
+#[allow(unused_variables)]
 #[async_trait]
-pub trait ConsumerPlugin {
-    async fn on_connect(&self, consumer: &Consumer) -> Result<(), NeutronError> {
+pub trait ConsumerPlugin<T>
+where
+    T: ConsumerDataTrait,
+{
+    async fn on_connect(&mut self, consumer: &Consumer<T>) -> Result<(), NeutronError> {
         Ok(())
     }
-    async fn on_disconnect(&self, consumer: &Consumer) -> Result<(), NeutronError> {
+    async fn on_disconnect(&mut self, consumer: &Consumer<T>) -> Result<(), NeutronError> {
         Ok(())
     }
     async fn on_message(
-        &self,
-        consumer: &Consumer,
-        message: Message<Vec<u8>>,
+        &mut self,
+        consumer: &Consumer<T>,
+        message: Message<T>,
     ) -> Result<(), NeutronError> {
         Ok(())
     }
 }
 
-pub struct ConsumerBuilder {
-    plugins: Vec<Box<dyn ConsumerPlugin + Send + Sync>>,
+pub struct ConsumerBuilder<T>
+where
+    T: ConsumerDataTrait,
+{
+    plugins: Vec<Box<dyn ConsumerPlugin<T> + Send + Sync>>,
     consumer_name: Option<String>,
     topic: Option<String>,
     subscription: Option<String>,
-    client_connection: Option<EngineConnection<Outbound, Inbound>>,
 }
 
-impl ConsumerBuilder {
+impl<T> ConsumerBuilder<T>
+where
+    T: ConsumerDataTrait,
+{
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
             consumer_name: None,
             topic: None,
             subscription: None,
-            client_connection: None,
         }
     }
 
@@ -321,15 +342,18 @@ impl ConsumerBuilder {
         self
     }
 
-    pub fn add_plugin<T>(mut self, plugin: T) -> Self
+    pub fn add_plugin<Plugin>(mut self, plugin: Plugin) -> Self
     where
-        T: ConsumerPlugin + Send + Sync + 'static,
+        Plugin: ConsumerPlugin<T> + Send + Sync + 'static,
     {
         self.plugins.push(Box::new(plugin));
         self
     }
 
-    pub async fn connect(self, pulsar_manager: &PulsarManager) -> Consumer {
+    pub async fn connect(
+        self,
+        pulsar_manager: &PulsarManager,
+    ) -> Result<Consumer<T>, NeutronError> {
         let consumer_name = self.consumer_name.unwrap();
         let topic = self.topic.unwrap();
         let subscription = self.subscription.unwrap();
@@ -340,10 +364,7 @@ impl ConsumerBuilder {
             subscription,
         };
 
-        let client_engine_connection = pulsar_manager
-            .register_consumer(&consumer_config)
-            .await
-            .unwrap();
+        let client_engine_connection = pulsar_manager.register_consumer(&consumer_config).await?;
 
         let consumer = Consumer {
             config: consumer_config,
@@ -355,8 +376,7 @@ impl ConsumerBuilder {
             plugins: self.plugins.into(),
         };
 
-        consumer.connect().await.unwrap();
-
-        consumer
+        consumer.connect().await?;
+        Ok(consumer)
     }
 }

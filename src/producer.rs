@@ -10,11 +10,25 @@ use crate::{
 };
 use futures::lock::Mutex;
 #[cfg(feature = "json")]
-use serde::de::DeserializeOwned;
+use serde::ser::Serialize;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::error::NeutronError;
+
+#[cfg(feature = "json")]
+pub trait ProducerDataTrait: Serialize + Send + Sync + Clone {}
+
+#[cfg(not(feature = "json"))]
+pub trait ProducerDataTrait: Into<Vec<u8>> + Send + Sync + Clone {}
+
+// Implement the trait for all types that satisfy the trait bounds.
+// This is a simplified example; for real-world usage, you might need to adjust it.
+#[cfg(feature = "json")]
+impl<T: Serialize + Send + Sync + Clone> ProducerDataTrait for T {}
+
+#[cfg(not(feature = "json"))]
+impl<T: Into<Vec<u8>> + Send + Sync + Clone> ProducerDataTrait for T {}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProducerConfig {
@@ -27,16 +41,23 @@ type ResultInbound = Result<Inbound, NeutronError>;
 type ResultOutbound = Result<Outbound, NeutronError>;
 
 #[allow(dead_code)]
-pub struct Producer {
+pub struct Producer<T>
+where
+    T: ProducerDataTrait,
+{
     pub(crate) config: RwLock<ProducerConfig>,
     client_engine_connection: EngineConnection<Outbound, Inbound>,
     resolver_manager: ResolverManager<Inbound>,
     inbound_buffer: Mutex<Vec<Inbound>>,
     sequence_id: AtomicU64,
     request_id: AtomicU64,
+    _phantom: std::marker::PhantomData<T>,
 }
 
-impl Producer {
+impl<T> Producer<T>
+where
+    T: ProducerDataTrait,
+{
     pub async fn send_and_resolve(
         &self,
         socket_connection: &EngineConnection<Outbound, Inbound>,
@@ -138,10 +159,7 @@ impl Producer {
         }
     }
 
-    pub async fn send<T>(&self, message: T) -> Result<(), NeutronError>
-    where
-        T: Into<Vec<u8>>,
-    {
+    pub async fn send(&self, message: T) -> Result<(), NeutronError> {
         let outbound = {
             let config = self.config.read().await;
             Outbound::Client(ClientOutbound::Send {
@@ -150,6 +168,10 @@ impl Producer {
                 sequence_id: self
                     .sequence_id
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                #[cfg(feature = "json")]
+                payload: serde_json::to_vec(&message)
+                    .map_err(|_| NeutronError::SerializationFailed)?,
+                #[cfg(not(feature = "json"))]
                 payload: message.into(),
             })
         };
@@ -159,20 +181,26 @@ impl Producer {
     }
 }
 
-pub struct ProducerBuilder {
+pub struct ProducerBuilder<T>
+where
+    T: ProducerDataTrait,
+{
     producer_name: Option<String>,
     topic: Option<String>,
     producer_id: Option<u64>,
-    client_connection: Option<EngineConnection<Outbound, Inbound>>,
+    _phantom: std::marker::PhantomData<T>,
 }
 
-impl ProducerBuilder {
+impl<T> ProducerBuilder<T>
+where
+    T: ProducerDataTrait,
+{
     pub fn new() -> Self {
         Self {
             producer_name: None,
             topic: None,
             producer_id: None,
-            client_connection: None,
+            _phantom: std::marker::PhantomData,
         }
     }
 
@@ -191,7 +219,10 @@ impl ProducerBuilder {
         self
     }
 
-    pub async fn connect(self, pulsar_manager: &PulsarManager) -> Producer {
+    pub async fn connect(
+        self,
+        pulsar_manager: &PulsarManager,
+    ) -> Result<Producer<T>, NeutronError> {
         let producer_name = self.producer_name.unwrap();
         let topic = self.topic.unwrap();
         let producer_id = self.producer_id.unwrap_or(0);
@@ -201,10 +232,7 @@ impl ProducerBuilder {
             topic,
         };
 
-        let client_engine_connection = pulsar_manager
-            .register_producer(&producer_config)
-            .await
-            .unwrap();
+        let client_engine_connection = pulsar_manager.register_producer(&producer_config).await?;
 
         let producer = Producer {
             config: RwLock::new(producer_config),
@@ -213,10 +241,11 @@ impl ProducerBuilder {
             inbound_buffer: Mutex::new(Vec::new()),
             sequence_id: AtomicU64::new(0),
             request_id: AtomicU64::new(0),
+            _phantom: std::marker::PhantomData,
         };
 
-        producer.connect().await.unwrap();
+        producer.connect().await?;
 
-        producer
+        Ok(producer)
     }
 }

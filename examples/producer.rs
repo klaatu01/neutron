@@ -1,9 +1,20 @@
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[allow(dead_code)]
 struct Data {
     name: String,
+}
+
+impl TryFrom<Vec<u8>> for Data {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Ok(Data {
+            name: String::from_utf8(value).unwrap(),
+        })
+    }
 }
 
 impl Into<Vec<u8>> for Data {
@@ -20,22 +31,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoint_port: 6650,
     };
 
-    let producer_config = neutron::ProducerConfig {
-        producer_id: 0,
-        topic: "test".to_string(),
-        producer_name: Some("test-producer".to_string()),
-    };
+    let pulsar = neutron::PulsarBuilder::new()
+        .with_config(pulsar_config)
+        .build()
+        .run();
 
-    let producer = neutron::Producer::new(pulsar_config, producer_config)
-        .connect()
+    let producer = neutron::ProducerBuilder::new()
+        .with_producer_name("test")
+        .with_topic("test")
+        .connect(&pulsar)
         .await?;
 
-    log::info!("Connected to pulsar");
     loop {
         let data = Data {
-            name: format!("data-{}", Utc::now().to_rfc3339()),
+            name: Utc::now().to_rfc3339(),
         };
-        log::info!("Sending message.");
         producer.send(data).await?;
     }
 

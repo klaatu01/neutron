@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use neutron::{ConsumerBuilder, ConsumerPlugin, NeutronError};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[allow(dead_code)]
 struct Data {
     name: String,
@@ -26,28 +27,64 @@ impl Into<Vec<u8>> for Data {
 pub struct PayloadLoggerPlugin;
 pub struct AutoAckPlugin;
 
+// recrd the number of messages recieved per second
+pub struct TransactionsPerSecondCounterPlugin {
+    pub transactions: u64,
+    pub start_time: Option<std::time::Instant>,
+}
+
+impl Default for TransactionsPerSecondCounterPlugin {
+    fn default() -> Self {
+        TransactionsPerSecondCounterPlugin {
+            transactions: 0,
+            start_time: None,
+        }
+    }
+}
+
 #[async_trait]
-impl ConsumerPlugin for PayloadLoggerPlugin {
+impl ConsumerPlugin<Data> for PayloadLoggerPlugin {
     async fn on_message(
-        &self,
-        _: &neutron::Consumer,
-        message: neutron::Message<Vec<u8>>,
+        &mut self,
+        _: &neutron::Consumer<Data>,
+        message: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
-        let data = Data::try_from(message.payload.clone())
-            .map_err(|_| NeutronError::DeserializationFailed)?;
-        log::info!("From plugin: {}", data.name);
+        log::info!("From plugin: {}", message.payload.name);
         Ok(())
     }
 }
 
 #[async_trait]
-impl ConsumerPlugin for AutoAckPlugin {
+impl ConsumerPlugin<Data> for AutoAckPlugin {
     async fn on_message(
-        &self,
-        consumer: &neutron::Consumer,
-        message: neutron::Message<Vec<u8>>,
+        &mut self,
+        consumer: &neutron::Consumer<Data>,
+        message: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
         consumer.ack(&message.message_id).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ConsumerPlugin<Data> for TransactionsPerSecondCounterPlugin {
+    async fn on_message(
+        &mut self,
+        consumer: &neutron::Consumer<Data>,
+        message: neutron::Message<Data>,
+    ) -> Result<(), NeutronError> {
+        if self.start_time.is_none() {
+            self.start_time = Some(std::time::Instant::now());
+        }
+
+        self.transactions += 1;
+        let elapsed = self.start_time.unwrap().elapsed();
+        if elapsed.as_secs() > 0 {
+            log::info!(
+                "Transactions per second: {}",
+                self.transactions / elapsed.as_secs()
+            );
+        }
         Ok(())
     }
 }
@@ -69,17 +106,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_topic("test")
         .with_subscription("test")
         .with_consumer_name("test")
-        .add_plugin(PayloadLoggerPlugin)
         .add_plugin(AutoAckPlugin)
+        .add_plugin(TransactionsPerSecondCounterPlugin::default())
         .connect(&pulsar)
-        .await;
+        .await?;
 
-    let producer = neutron::ProducerBuilder::new()
-        .with_producer_name("test")
-        .with_topic("test")
-        .connect(&pulsar)
-        .await;
-
-    consumer.start().await.unwrap();
+    consumer.start().await?;
     Ok(())
 }
