@@ -1,4 +1,4 @@
-# Neutron - **This package is currently a Work In Progress and is in prerelease only**
+# Neutron - **This package is currently a Work In Progress and is NOT Production Ready**
 
 An [Apache Pulsar](https://github.com/apache/pulsar) client library, built with pure rust 🦀 and requires no C++ dependencies.
 Neutron is built with a focus on:
@@ -12,7 +12,8 @@ Neutron is built with a focus on:
 [x] Consumer Client 📥
 [x] Producer Client 📤
 [x] Plugin Support 🔌
-[] TLS Support via [rustls](https://github.com/rustls/rustls). 🔐
+[x] Multi/Dual Consumer & Producer Support 🤝
+[x] TLS Support via [rustls](https://github.com/rustls/rustls). 🔐
 [] Automatic Reconnection ♻️
 
 ## Installation
@@ -40,5 +41,3 @@ The `json` feature provides automatic de/serialization through `serde_json`.
 ## Usage
 
 There are two ways to use a Consumer or Producer client; As stream/sink or by starting it as a task.
-
-### Stream
