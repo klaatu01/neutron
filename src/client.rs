@@ -276,19 +276,13 @@ impl Pulsar {
     }
 
     pub fn run(mut self) -> PulsarManager {
-        let (tx, _rx) = async_channel::unbounded::<Result<(), NeutronError>>();
-        let (_tx, rx) =
-            async_channel::unbounded::<Result<PulsarManagerRegistration, NeutronError>>();
-
-        let registration_manager_connection = EngineConnection::new(tx, rx);
+        let (registration_manager_connection, inner_connection) = EngineConnection::pair();
 
         tokio::task::spawn(async move {
             self.start_pulsar(registration_manager_connection).await;
         });
 
-        PulsarManager {
-            inner_connection: EngineConnection::new(_tx, _rx),
-        }
+        PulsarManager { inner_connection }
     }
 }
 
@@ -381,43 +375,37 @@ impl PulsarManager {
         &self,
         config: &ConsumerConfig,
     ) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
-        let (tx, _rx) = async_channel::unbounded::<ResultInbound>();
-        let (_tx, rx) = async_channel::unbounded::<ResultOutbound>();
-        let connection = EngineConnection::new(tx, rx);
+        let (consumer_connection, connection) = EngineConnection::pair();
 
         self.inner_connection
             .send(Ok(PulsarManagerRegistration::Consumer {
                 consumer_id: config.consumer_id,
                 topic: config.topic.clone(),
-                connection,
+                connection: consumer_connection,
             }))
             .await
             .map_err(|_| NeutronError::ChannelTerminated)?;
 
         self.inner_connection.recv().await?;
-
-        Ok(EngineConnection::new(_tx, _rx))
+        Ok(connection)
     }
 
     pub async fn register_producer(
         &self,
         config: &ProducerConfig,
     ) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
-        let (tx, _rx) = async_channel::unbounded::<ResultInbound>();
-        let (_tx, rx) = async_channel::unbounded::<ResultOutbound>();
-        let connection = EngineConnection::new(tx, rx);
+        let (producer_connection, connection) = EngineConnection::pair();
 
         self.inner_connection
             .send(Ok(PulsarManagerRegistration::Producer {
                 producer_id: config.producer_id,
                 topic: config.topic.clone(),
-                connection,
+                connection: producer_connection,
             }))
             .await
             .map_err(|_| NeutronError::ChannelTerminated)?;
 
         self.inner_connection.recv().await?;
-
-        Ok(EngineConnection::new(_tx, _rx))
+        Ok(connection)
     }
 }

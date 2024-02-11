@@ -86,15 +86,10 @@ impl PulsarConnection {
 #[async_trait]
 impl Engine<Inbound, Outbound> for PulsarConnection {
     async fn run(mut self) -> EngineConnection<Outbound, Inbound> {
-        let (tx, _rx) = async_channel::unbounded::<ResultInbound>();
-        let (_tx, rx) = async_channel::unbounded::<ResultOutbound>();
-
-        let client_connection = EngineConnection::new(tx, rx);
-
+        let (client_connection, connection) = EngineConnection::pair();
         tokio::task::spawn(async move {
             self.start_connection(client_connection).await;
         });
-
-        EngineConnection::new(_tx, _rx)
+        connection
     }
 }
