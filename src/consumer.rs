@@ -3,7 +3,7 @@ use crate::{
     message::{
         proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
     },
-    resolver_manager::ResolverManager,
+    resolver_manager::{Resolver, ResolverManager},
     PulsarManager,
 };
 use async_trait::async_trait;
@@ -13,6 +13,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
+use crate::combinators::AsyncMap;
 use crate::error::NeutronError;
 
 #[cfg(feature = "json")]
@@ -67,6 +68,32 @@ impl<T> Consumer<T>
 where
     T: ConsumerDataTrait,
 {
+    pub async fn resolve(
+        &self,
+        socket_connection: &EngineConnection<Outbound, Inbound>,
+        resolver: Resolver<Inbound>,
+    ) -> Result<Inbound, NeutronError> {
+        loop {
+            tokio::select! {
+                inbound = socket_connection.recv() => {
+                    match inbound {
+                        Ok(inbound) => {
+                            if !self.resolver_manager.try_resolve(&inbound).await {
+                                self.inbound_buffer.lock().await.push(inbound);
+                            }
+                        }
+                        Err(e) => {
+                            return Err(e)
+                        }
+                    }
+                }
+                inbound = resolver.recv() => {
+                    return inbound.map_err(|_| NeutronError::OperationTimeout);
+                }
+            }
+        }
+    }
+
     pub async fn send_and_resolve(
         &self,
         socket_connection: &EngineConnection<Outbound, Inbound>,
@@ -79,28 +106,7 @@ where
                         .send(Ok(outbound.clone()))
                         .await
                         .map_err(|_| NeutronError::ChannelTerminated)?;
-
-                    loop {
-                        tokio::select! {
-                            inbound = socket_connection.recv() => {
-                                match inbound {
-                                    Ok(inbound) => {
-                                        if self.resolver_manager.try_resolve(&inbound).await {
-                                            return Ok(inbound);
-                                        } else {
-                                            self.inbound_buffer.lock().await.push(inbound);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        return Err(e)
-                                    }
-                                }
-                            }
-                            inbound = resolver.recv() => {
-                                return inbound.map_err(|_| NeutronError::OperationTimeout);
-                            }
-                        }
-                    }
+                    self.resolve(socket_connection, resolver).await
                 }
                 _ => Err(NeutronError::Unresolvable),
             },

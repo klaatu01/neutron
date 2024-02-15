@@ -1,6 +1,7 @@
 mod auth;
 mod client;
 mod codec;
+mod combinators;
 mod connection;
 mod consumer;
 mod engine;

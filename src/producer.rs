@@ -78,9 +78,8 @@ where
                                     Ok(inbound) => {
                                         if self.resolver_manager.try_resolve(&inbound).await {
                                             return Ok(inbound);
-                                        } else {
-                                            self.inbound_buffer.lock().await.push(inbound);
                                         }
+                                        self.inbound_buffer.lock().await.push(inbound);
                                     }
                                     Err(e) => {
                                         return Err(e)
