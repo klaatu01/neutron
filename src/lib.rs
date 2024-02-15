@@ -1,5 +1,4 @@
 mod auth;
-mod client;
 mod codec;
 mod combinators;
 mod connection;
@@ -8,10 +7,11 @@ mod engine;
 mod error;
 mod message;
 mod producer;
+mod pulsar;
 mod resolver_manager;
 
 pub use auth::*;
-pub use client::*;
 pub use consumer::*;
 pub use error::*;
 pub use producer::*;
+pub use pulsar::*;
