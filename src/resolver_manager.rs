@@ -6,7 +6,7 @@ use tokio::time::Instant;
 type Comparison<T> = Box<dyn Fn(&T) -> bool + Send + 'static>;
 
 #[allow(dead_code)]
-enum Resolver<T>
+enum ResolverSender<T>
 where
     T: Resolvable + Clone + Send + 'static,
 {
@@ -21,8 +21,10 @@ pub trait Resolvable {
 }
 
 pub struct ResolverManager<T: Resolvable + Clone + Send + 'static> {
-    map: Mutex<HashMap<String, (Resolver<T>, Instant)>>,
+    map: Mutex<HashMap<String, (ResolverSender<T>, Instant)>>,
 }
+
+pub type Resolver<T> = async_channel::Receiver<T>;
 
 impl<T: Resolvable + Clone + Send + 'static> ResolverManager<T> {
     pub fn new() -> Self {
@@ -31,7 +33,7 @@ impl<T: Resolvable + Clone + Send + 'static> ResolverManager<T> {
         }
     }
 
-    pub async fn put_resolver<K>(&self, resolve: &K) -> Option<async_channel::Receiver<T>>
+    pub async fn put_resolver<K>(&self, resolve: &K) -> Option<Resolver<T>>
     where
         K: Resolvable,
     {
@@ -40,7 +42,7 @@ impl<T: Resolvable + Clone + Send + 'static> ResolverManager<T> {
                 let (tx, rx) = async_channel::bounded(1);
                 self.map.lock().await.insert(
                     resolver_id.to_string(),
-                    (Resolver::Basic(tx), Instant::now()),
+                    (ResolverSender::Basic(tx), Instant::now()),
                 );
                 Some(rx)
             }
@@ -53,7 +55,7 @@ impl<T: Resolvable + Clone + Send + 'static> ResolverManager<T> {
         &self,
         resolve: &K,
         comparison: Comparison<T>,
-    ) -> Option<async_channel::Receiver<T>>
+    ) -> Option<Resolver<T>>
     where
         K: Resolvable,
     {
@@ -63,7 +65,7 @@ impl<T: Resolvable + Clone + Send + 'static> ResolverManager<T> {
                 self.map.lock().await.insert(
                     resolver_id.to_string(),
                     (
-                        Resolver::Comparison(Box::new(comparison), tx),
+                        ResolverSender::Comparison(Box::new(comparison), tx),
                         Instant::now(),
                     ),
                 );
@@ -78,14 +80,14 @@ impl<T: Resolvable + Clone + Send + 'static> ResolverManager<T> {
             let mut map = self.map.lock().await;
             let resolver = map.remove(&resolver_id);
             match resolver {
-                Some((Resolver::Comparison(comparison, tx), instant)) => {
+                Some((ResolverSender::Comparison(comparison, tx), instant)) => {
                     if comparison(resolvable) {
                         let _ = tx.send(resolvable.clone()).await;
                     };
                     log::debug!("{} in {:?}", resolver_id, instant.elapsed());
                     true
                 }
-                Some((Resolver::Basic(tx), instant)) => {
+                Some((ResolverSender::Basic(tx), instant)) => {
                     let _ = tx.send(resolvable.clone()).await;
                     log::debug!("{} in {:?}", resolver_id, instant.elapsed());
                     true

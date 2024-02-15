@@ -1,9 +1,10 @@
+use crate::error::NeutronError;
 use crate::{
     engine::EngineConnection,
     message::{
         proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
     },
-    resolver_manager::ResolverManager,
+    resolver_manager::{Resolver, ResolverManager},
     PulsarManager,
 };
 use async_trait::async_trait;
@@ -12,8 +13,6 @@ use futures::lock::Mutex;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use tokio::sync::RwLock;
-
-use crate::error::NeutronError;
 
 #[cfg(feature = "json")]
 pub trait ConsumerDataTrait: DeserializeOwned + Send + Sync + Clone {}
@@ -55,7 +54,7 @@ where
     T: ConsumerDataTrait,
 {
     pub(crate) config: ConsumerConfig,
-    pub(crate) client_engine_connection: EngineConnection<Outbound, Inbound>,
+    pub(crate) pulsar_engine_connection: EngineConnection<Outbound, Inbound>,
     pub(crate) resolver_manager: ResolverManager<Inbound>,
     pub(crate) inbound_buffer: Mutex<Vec<Inbound>>,
     pub(crate) message_permits: u32,
@@ -67,6 +66,32 @@ impl<T> Consumer<T>
 where
     T: ConsumerDataTrait,
 {
+    pub async fn resolve(
+        &self,
+        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
+        resolver: Resolver<Inbound>,
+    ) -> Result<Inbound, NeutronError> {
+        loop {
+            tokio::select! {
+                inbound = pulsar_engine_connection.recv() => {
+                    match inbound {
+                        Ok(inbound) => {
+                            if !self.resolver_manager.try_resolve(&inbound).await {
+                                self.inbound_buffer.lock().await.push(inbound);
+                            }
+                        }
+                        Err(e) => {
+                            return Err(e)
+                        }
+                    }
+                }
+                inbound = resolver.recv() => {
+                    return inbound.map_err(|_| NeutronError::OperationTimeout);
+                }
+            }
+        }
+    }
+
     pub async fn send_and_resolve(
         &self,
         socket_connection: &EngineConnection<Outbound, Inbound>,
@@ -79,28 +104,7 @@ where
                         .send(Ok(outbound.clone()))
                         .await
                         .map_err(|_| NeutronError::ChannelTerminated)?;
-
-                    loop {
-                        tokio::select! {
-                            inbound = socket_connection.recv() => {
-                                match inbound {
-                                    Ok(inbound) => {
-                                        if self.resolver_manager.try_resolve(&inbound).await {
-                                            return Ok(inbound);
-                                        } else {
-                                            self.inbound_buffer.lock().await.push(inbound);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        return Err(e)
-                                    }
-                                }
-                            }
-                            inbound = resolver.recv() => {
-                                return inbound.map_err(|_| NeutronError::OperationTimeout);
-                            }
-                        }
-                    }
+                    self.resolve(socket_connection, resolver).await
                 }
                 _ => Err(NeutronError::Unresolvable),
             },
@@ -110,20 +114,20 @@ where
 
     async fn flow(
         &self,
-        client_engine_connection: &EngineConnection<Outbound, Inbound>,
+        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
         permits: u32,
     ) -> Result<(), NeutronError> {
         let outbound = Outbound::Client(ClientOutbound::Flow {
             consumer_id: self.config.consumer_id,
             message_permits: permits,
         });
-        let _ = client_engine_connection.send(Ok(outbound)).await?;
+        let _ = pulsar_engine_connection.send(Ok(outbound)).await?;
         Ok(())
     }
 
     pub async fn subscribe(
         &self,
-        client_engine_connection: &EngineConnection<Outbound, Inbound>,
+        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
     ) -> Result<(), NeutronError> {
         let outbound = Outbound::Client(ClientOutbound::Subscribe {
             topic: self.config.topic.clone(),
@@ -133,29 +137,29 @@ where
             request_id: 1,
         });
         let _ = self
-            .send_and_resolve(client_engine_connection, &Ok(outbound))
+            .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
             .await?;
         Ok(())
     }
 
     pub async fn lookup_topic(
         &self,
-        client_engine_connection: &EngineConnection<Outbound, Inbound>,
+        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
     ) -> Result<(), NeutronError> {
         let outbound = Outbound::Client(ClientOutbound::LookupTopic {
             topic: self.config.topic.clone(),
             request_id: 0,
         });
         let _ = self
-            .send_and_resolve(client_engine_connection, &Ok(outbound))
+            .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
             .await?;
         Ok(())
     }
 
     pub async fn connect(&self) -> Result<(), NeutronError> {
-        self.lookup_topic(&self.client_engine_connection).await?;
-        self.subscribe(&self.client_engine_connection).await?;
-        self.flow(&self.client_engine_connection, self.message_permits * 2)
+        self.lookup_topic(&self.pulsar_engine_connection).await?;
+        self.subscribe(&self.pulsar_engine_connection).await?;
+        self.flow(&self.pulsar_engine_connection, self.message_permits * 2)
             .await?;
         Ok(())
     }
@@ -164,7 +168,7 @@ where
         {
             let mut current_message_permits = self.current_message_permits.write().await;
             if *current_message_permits >= self.message_permits {
-                self.flow(&self.client_engine_connection, self.message_permits)
+                self.flow(&self.pulsar_engine_connection, self.message_permits)
                     .await?;
                 *current_message_permits = 0;
             }
@@ -177,7 +181,7 @@ where
         if let Some(inbound) = inbound_buffer.pop() {
             Ok(inbound)
         } else {
-            let inbound = self.client_engine_connection.recv().await?;
+            let inbound = self.pulsar_engine_connection.recv().await?;
             Ok(inbound)
         }
     }
@@ -210,7 +214,7 @@ where
         Ok(message)
     }
 
-    pub async fn next_message(&self) -> Result<Message<T>, NeutronError> {
+    pub async fn next(&self) -> Result<Message<T>, NeutronError> {
         loop {
             self.check_and_flow().await?;
             match self.next_inbound().await {
@@ -259,12 +263,12 @@ where
             message_id: message_id.clone(),
         }]));
         let _ = self
-            .send_and_resolve(&self.client_engine_connection, &Ok(outbound))
+            .send_and_resolve(&self.pulsar_engine_connection, &Ok(outbound))
             .await?;
         Ok(())
     }
 
-    pub async fn start(&self) -> Result<(), NeutronError> {
+    pub async fn consume(&self) -> Result<(), NeutronError> {
         loop {
             self.check_and_flow().await?;
             let inbound = self.next_inbound().await?;
@@ -364,11 +368,11 @@ where
             subscription,
         };
 
-        let client_engine_connection = pulsar_manager.register_consumer(&consumer_config).await?;
+        let pulsar_engine_connection = pulsar_manager.register_consumer(&consumer_config).await?;
 
         let consumer = Consumer {
             config: consumer_config,
-            client_engine_connection,
+            pulsar_engine_connection,
             resolver_manager: ResolverManager::new(),
             inbound_buffer: Mutex::new(Vec::new()),
             message_permits: 250,
@@ -417,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_connect_test() {
-        let (client_engine_connection, consumer_connection) =
+        let (pulsar_engine_connection, consumer_connection) =
             EngineConnection::<Outbound, Inbound>::pair();
         let consumer_message_permits = 250;
         let consumer: Consumer<TestConsumerData> = Consumer {
@@ -427,7 +431,7 @@ mod tests {
                 topic: "test".to_string(),
                 subscription: "test".to_string(),
             },
-            client_engine_connection,
+            pulsar_engine_connection,
             resolver_manager: ResolverManager::new(),
             inbound_buffer: Mutex::new(Vec::new()),
             message_permits: consumer_message_permits.clone(),
@@ -483,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_handle_disconnect() {
-        let (client_engine_connection, consumer_connection) =
+        let (pulsar_engine_connection, consumer_connection) =
             EngineConnection::<Outbound, Inbound>::pair();
         let consumer_message_permits = 250;
         let consumer: Consumer<TestConsumerData> = Consumer {
@@ -493,7 +497,7 @@ mod tests {
                 topic: "test".to_string(),
                 subscription: "test".to_string(),
             },
-            client_engine_connection,
+            pulsar_engine_connection,
             resolver_manager: ResolverManager::new(),
             inbound_buffer: Mutex::new(Vec::new()),
             message_permits: consumer_message_permits.clone(),
@@ -504,7 +508,7 @@ mod tests {
             .send(Err(NeutronError::Disconnected))
             .await
             .unwrap();
-        let output = consumer.start().await;
+        let output = consumer.consume().await;
         assert!(output.is_err());
         match output {
             Err(NeutronError::Disconnected) => assert!(true),
@@ -528,7 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_test() {
-        let (client_engine_connection, consumer_connection) =
+        let (pulsar_engine_connection, consumer_connection) =
             EngineConnection::<Outbound, Inbound>::pair();
         let consumer_message_permits = 500;
         let consumer: Consumer<TestConsumerData> = Consumer {
@@ -538,7 +542,7 @@ mod tests {
                 topic: "test".to_string(),
                 subscription: "test".to_string(),
             },
-            client_engine_connection,
+            pulsar_engine_connection,
             resolver_manager: ResolverManager::new(),
             inbound_buffer: Mutex::new(Vec::new()),
             message_permits: consumer_message_permits.clone(),
@@ -638,7 +642,7 @@ mod tests {
             async {
                 let result = consumer.connect().await;
                 assert!(result.is_ok());
-                consumer.start().await
+                consumer.consume().await
             },
             mock_server
         );

@@ -5,7 +5,7 @@ use crate::{
     message::{
         proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
     },
-    resolver_manager::ResolverManager,
+    resolver_manager::{Resolver, ResolverManager},
     PulsarConfig, PulsarManager,
 };
 use futures::lock::Mutex;
@@ -46,7 +46,7 @@ where
     T: ProducerDataTrait,
 {
     pub(crate) config: RwLock<ProducerConfig>,
-    client_engine_connection: EngineConnection<Outbound, Inbound>,
+    pulsar_engine_connection: EngineConnection<Outbound, Inbound>,
     resolver_manager: ResolverManager<Inbound>,
     inbound_buffer: Mutex<Vec<Inbound>>,
     sequence_id: AtomicU64,
@@ -58,40 +58,45 @@ impl<T> Producer<T>
 where
     T: ProducerDataTrait,
 {
-    pub async fn send_and_resolve(
+    pub async fn resolve(
         &self,
         socket_connection: &EngineConnection<Outbound, Inbound>,
+        resolver: Resolver<Inbound>,
+    ) -> Result<Inbound, NeutronError> {
+        loop {
+            tokio::select! {
+                inbound = socket_connection.recv() => {
+                    match inbound {
+                        Ok(inbound) => {
+                            if !self.resolver_manager.try_resolve(&inbound).await {
+                                self.inbound_buffer.lock().await.push(inbound);
+                            }
+                        }
+                        Err(e) => {
+                            return Err(e)
+                        }
+                    }
+                }
+                inbound = resolver.recv() => {
+                    return inbound.map_err(|_| NeutronError::OperationTimeout);
+                }
+            }
+        }
+    }
+
+    pub async fn send_and_resolve(
+        &self,
+        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
         outbound: &ResultOutbound,
     ) -> ResultInbound {
         match outbound {
             Ok(outbound) => match self.resolver_manager.put_resolver(outbound).await {
                 Some(resolver) => {
-                    socket_connection
+                    pulsar_engine_connection
                         .send(Ok(outbound.clone()))
                         .await
                         .map_err(|_| NeutronError::ChannelTerminated)?;
-
-                    loop {
-                        tokio::select! {
-                            inbound = socket_connection.recv() => {
-                                match inbound {
-                                    Ok(inbound) => {
-                                        if self.resolver_manager.try_resolve(&inbound).await {
-                                            return Ok(inbound);
-                                        } else {
-                                            self.inbound_buffer.lock().await.push(inbound);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        return Err(e)
-                                    }
-                                }
-                            }
-                            inbound = resolver.recv() => {
-                                return inbound.map_err(|_| NeutronError::OperationTimeout);
-                            }
-                        }
-                    }
+                    self.resolve(pulsar_engine_connection, resolver).await
                 }
                 _ => Err(NeutronError::Unresolvable),
             },
@@ -101,7 +106,7 @@ where
 
     pub async fn lookup_topic(
         &self,
-        client_engine_connection: &EngineConnection<Outbound, Inbound>,
+        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
     ) -> Result<(), NeutronError> {
         let outbound = {
             let config = self.config.read().await;
@@ -113,14 +118,14 @@ where
             })
         };
         let _ = self
-            .send_and_resolve(client_engine_connection, &Ok(outbound))
+            .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
             .await?;
         Ok(())
     }
 
     pub async fn register(
         &self,
-        client_engine_connection: &EngineConnection<Outbound, Inbound>,
+        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
     ) -> Result<(), NeutronError> {
         let mut config = self.config.write().await;
         let outbound = Outbound::Client(ClientOutbound::Producer {
@@ -132,7 +137,7 @@ where
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         });
         let inbound = self
-            .send_and_resolve(client_engine_connection, &Ok(outbound))
+            .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
             .await?;
         match inbound {
             Inbound::Client(ClientInbound::ProducerSuccess { producer_name, .. }) => {
@@ -144,8 +149,8 @@ where
     }
 
     pub async fn connect(&self) -> Result<(), NeutronError> {
-        self.lookup_topic(&self.client_engine_connection).await?;
-        self.register(&self.client_engine_connection).await?;
+        self.lookup_topic(&self.pulsar_engine_connection).await?;
+        self.register(&self.pulsar_engine_connection).await?;
         Ok(())
     }
 
@@ -154,7 +159,7 @@ where
         if let Some(inbound) = inbound_buffer.pop() {
             Ok(inbound)
         } else {
-            let inbound = self.client_engine_connection.recv().await?;
+            let inbound = self.pulsar_engine_connection.recv().await?;
             Ok(inbound)
         }
     }
@@ -175,7 +180,7 @@ where
                 payload: message.into(),
             })
         };
-        self.send_and_resolve(&self.client_engine_connection, &Ok(outbound))
+        self.send_and_resolve(&self.pulsar_engine_connection, &Ok(outbound))
             .await?;
         Ok(())
     }
@@ -232,11 +237,11 @@ where
             topic,
         };
 
-        let client_engine_connection = pulsar_manager.register_producer(&producer_config).await?;
+        let pulsar_engine_connection = pulsar_manager.register_producer(&producer_config).await?;
 
         let producer = Producer {
             config: RwLock::new(producer_config),
-            client_engine_connection,
+            pulsar_engine_connection,
             resolver_manager: ResolverManager::new(),
             inbound_buffer: Mutex::new(Vec::new()),
             sequence_id: AtomicU64::new(0),
