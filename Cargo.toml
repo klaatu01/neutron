@@ -28,7 +28,6 @@ webpki-roots = "0.26.1"
 
 [build-dependencies]
 protobuf-codegen = "3.3.0"
-protobuf-parser = "0.1.3"
 
 [features]
 json = ["serde_json"]
