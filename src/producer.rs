@@ -192,7 +192,6 @@ where
 {
     producer_name: Option<String>,
     topic: Option<String>,
-    producer_id: Option<u64>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -204,7 +203,6 @@ where
         Self {
             producer_name: None,
             topic: None,
-            producer_id: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -219,18 +217,13 @@ where
         self
     }
 
-    pub fn with_producer_id(mut self, producer_id: u64) -> Self {
-        self.producer_id = Some(producer_id);
-        self
-    }
-
     pub async fn connect(
         self,
         pulsar_manager: &PulsarManager,
     ) -> Result<Producer<T>, NeutronError> {
         let producer_name = self.producer_name.unwrap();
         let topic = self.topic.unwrap();
-        let producer_id = self.producer_id.unwrap_or(0);
+        let producer_id = pulsar_manager.producer_id();
         let producer_config = ProducerConfig {
             producer_name: Some(producer_name),
             producer_id,

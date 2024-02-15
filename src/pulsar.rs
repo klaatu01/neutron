@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicU64;
+
 use crate::connection::PulsarConnection;
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
@@ -70,9 +72,8 @@ impl Pulsar {
                                     Ok(inbound) => {
                                         if self.resolver_manager.try_resolve(&inbound).await {
                                             return Ok(inbound);
-                                        } else {
-                                            self.inbound_buffer.lock().await.push(inbound);
                                         }
+                                        self.inbound_buffer.lock().await.push(inbound);
                                     }
                                     Err(e) => {
                                         return Err(e)
@@ -120,12 +121,44 @@ impl Pulsar {
                     }
                 }
                 inbound => {
-                    for client_connection in client_connections {
-                        client_connection
-                            .get_connection()
-                            .send(Ok(inbound.clone()))
-                            .await
-                            .unwrap();
+                    let target = inbound.get_target();
+                    match target {
+                        Some(crate::message::Target::Producer { producer_id }) => {
+                            for client_connection in client_connections {
+                                if client_connection.is_producer()
+                                    && client_connection.get_id() == producer_id
+                                {
+                                    client_connection
+                                        .get_connection()
+                                        .send(Ok(inbound.clone()))
+                                        .await
+                                        .unwrap();
+                                }
+                            }
+                        }
+                        Some(crate::message::Target::Consumer { consumer_id }) => {
+                            log::info!("Consumer inbound: {:?}", inbound);
+                            for client_connection in client_connections {
+                                if client_connection.is_consumer()
+                                    && client_connection.get_id() == consumer_id
+                                {
+                                    client_connection
+                                        .get_connection()
+                                        .send(Ok(inbound.clone()))
+                                        .await
+                                        .unwrap();
+                                }
+                            }
+                        }
+                        None => {
+                            for client_connection in client_connections {
+                                client_connection
+                                    .get_connection()
+                                    .send(Ok(inbound.clone()))
+                                    .await
+                                    .unwrap();
+                            }
+                        }
                     }
                 }
             },
@@ -282,7 +315,7 @@ impl Pulsar {
             self.start_pulsar(registration_manager_connection).await;
         });
 
-        PulsarManager { inner_connection }
+        PulsarManager::new(inner_connection)
     }
 }
 
@@ -367,10 +400,28 @@ impl PulsarBuilder {
 }
 
 pub struct PulsarManager {
+    producer_id_generator: AtomicU64,
+    consumer_id_generator: AtomicU64,
     inner_connection: EngineConnection<PulsarManagerRegistration, ()>,
 }
 
 impl PulsarManager {
+    pub fn new(inner_connection: EngineConnection<PulsarManagerRegistration, ()>) -> Self {
+        Self {
+            producer_id_generator: AtomicU64::new(0),
+            consumer_id_generator: AtomicU64::new(0),
+            inner_connection,
+        }
+    }
+
+    pub fn consumer_id(&self) -> u64 {
+        self.consumer_id_generator
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn producer_id(&self) -> u64 {
+        self.producer_id_generator
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
     pub async fn register_consumer(
         &self,
         config: &ConsumerConfig,
