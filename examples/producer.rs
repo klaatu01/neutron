@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run();
 
     let producer = neutron::ProducerBuilder::new()
-        .with_producer_name("test_b")
+        .with_producer_name(&nanoid::nanoid!().to_string())
         .with_topic("test")
         .connect(&pulsar)
         .await?;

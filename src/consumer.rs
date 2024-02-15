@@ -407,6 +407,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
+
     use async_trait::async_trait;
     use futures::lock::Mutex;
     use tokio::sync::RwLock;
@@ -457,6 +459,7 @@ mod tests {
             message_permits: consumer_message_permits.clone(),
             current_message_permits: RwLock::new(0),
             plugins: Mutex::new(Vec::new()),
+            request_id: AtomicU64::new(0),
         };
         let mock_server = async move {
             loop {
@@ -523,6 +526,7 @@ mod tests {
             message_permits: consumer_message_permits.clone(),
             current_message_permits: RwLock::new(0),
             plugins: Mutex::new(Vec::new()),
+            request_id: AtomicU64::new(0),
         };
         consumer_connection
             .send(Err(NeutronError::Disconnected))
@@ -568,6 +572,7 @@ mod tests {
             message_permits: consumer_message_permits.clone(),
             current_message_permits: RwLock::new(0),
             plugins: Mutex::new(vec![Box::new(AutoAckPlugin)]),
+            request_id: AtomicU64::new(0),
         };
         let mock_server = async move {
             loop {
@@ -610,12 +615,14 @@ mod tests {
                 }
             }
             for x in 0..10000 {
+                let mut message_id = MessageIdData::default();
+                message_id.set_entryId(x);
+                message_id.set_ledgerId(x);
                 let _ = consumer_connection
                     .send(Ok(Inbound::Client(
                         crate::message::ClientInbound::Message {
                             consumer_id: 0,
-                            sequence_id: x,
-                            message_id: MessageIdData::default(),
+                            message_id: message_id.clone(),
                             payload: TestConsumerData {
                                 data: "hello_world".to_string(),
                             }
