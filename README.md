@@ -5,7 +5,6 @@ Neutron is built with a focus on:
 
 - Extensability through Plugins.
 - Simplicity by reducing the complexity of the internal client.
-- Stability by being well tested.
 
 ## Features:
 
