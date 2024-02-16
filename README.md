@@ -8,6 +8,7 @@ Neutron is built with a focus on:
 
 ## Features:
 
+- [x] Pure Rust, No C++ Dependencies 🦀
 - [x] Consumer Client 📥
 - [x] Producer Client 📤
 - [x] Plugin Support 🔌
