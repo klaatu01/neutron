@@ -29,5 +29,8 @@ webpki-roots = "0.26.1"
 [build-dependencies]
 protobuf-codegen = "3.3.0"
 
+[dev-dependencies]
+nanoid = "0.4.0"
+
 [features]
 json = ["serde_json"]

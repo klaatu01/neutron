@@ -12,6 +12,7 @@ use futures::lock::Mutex;
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::sync::atomic::AtomicU64;
 use tokio::sync::RwLock;
 
 #[cfg(feature = "json")]
@@ -59,6 +60,7 @@ where
     pub(crate) inbound_buffer: Mutex<Vec<Inbound>>,
     pub(crate) message_permits: u32,
     pub(crate) current_message_permits: RwLock<u32>,
+    pub(crate) request_id: AtomicU64,
     pub(crate) plugins: Mutex<Vec<Box<dyn ConsumerPlugin<T> + Send + Sync>>>,
 }
 
@@ -133,8 +135,10 @@ where
             topic: self.config.topic.clone(),
             subscription: self.config.subscription.clone(),
             consumer_id: self.config.consumer_id,
-            sub_type: crate::message::proto::pulsar::command_subscribe::SubType::Exclusive,
-            request_id: 1,
+            sub_type: crate::message::proto::pulsar::command_subscribe::SubType::Shared,
+            request_id: self
+                .request_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         });
         let _ = self
             .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
@@ -148,7 +152,9 @@ where
     ) -> Result<(), NeutronError> {
         let outbound = Outbound::Client(ClientOutbound::LookupTopic {
             topic: self.config.topic.clone(),
-            request_id: 0,
+            request_id: self
+                .request_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         });
         let _ = self
             .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
@@ -259,7 +265,9 @@ where
     pub async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
         let outbound = Outbound::Client(ClientOutbound::Ack(vec![Ack {
             consumer_id: self.config.consumer_id,
-            request_id: message_id.ledgerId() + message_id.entryId(),
+            request_id: self
+                .request_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             message_id: message_id.clone(),
         }]));
         let _ = self
@@ -284,6 +292,10 @@ where
                 _ => {}
             }
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.config.consumer_name
     }
 }
 
@@ -361,12 +373,19 @@ where
         let consumer_name = self.consumer_name.unwrap();
         let topic = self.topic.unwrap();
         let subscription = self.subscription.unwrap();
+        let consumer_id = pulsar_manager.consumer_id();
+
         let consumer_config = ConsumerConfig {
             consumer_name,
-            consumer_id: 0,
+            consumer_id,
             topic,
             subscription,
         };
+
+        log::info!(
+            "Created consumer, consumer_id: {}",
+            consumer_config.consumer_id
+        );
 
         let pulsar_engine_connection = pulsar_manager.register_consumer(&consumer_config).await?;
 
@@ -378,6 +397,7 @@ where
             message_permits: 250,
             current_message_permits: RwLock::new(0),
             plugins: self.plugins.into(),
+            request_id: AtomicU64::new(0),
         };
 
         consumer.connect().await?;
@@ -387,6 +407,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
+
     use async_trait::async_trait;
     use futures::lock::Mutex;
     use tokio::sync::RwLock;
@@ -437,6 +459,7 @@ mod tests {
             message_permits: consumer_message_permits.clone(),
             current_message_permits: RwLock::new(0),
             plugins: Mutex::new(Vec::new()),
+            request_id: AtomicU64::new(0),
         };
         let mock_server = async move {
             loop {
@@ -503,6 +526,7 @@ mod tests {
             message_permits: consumer_message_permits.clone(),
             current_message_permits: RwLock::new(0),
             plugins: Mutex::new(Vec::new()),
+            request_id: AtomicU64::new(0),
         };
         consumer_connection
             .send(Err(NeutronError::Disconnected))
@@ -548,6 +572,7 @@ mod tests {
             message_permits: consumer_message_permits.clone(),
             current_message_permits: RwLock::new(0),
             plugins: Mutex::new(vec![Box::new(AutoAckPlugin)]),
+            request_id: AtomicU64::new(0),
         };
         let mock_server = async move {
             loop {
@@ -590,12 +615,14 @@ mod tests {
                 }
             }
             for x in 0..10000 {
+                let mut message_id = MessageIdData::default();
+                message_id.set_entryId(x);
+                message_id.set_ledgerId(x);
                 let _ = consumer_connection
                     .send(Ok(Inbound::Client(
                         crate::message::ClientInbound::Message {
-                            producer_id: 0,
-                            sequence_id: x,
-                            message_id: MessageIdData::default(),
+                            consumer_id: 0,
+                            message_id: message_id.clone(),
                             payload: TestConsumerData {
                                 data: "hello_world".to_string(),
                             }

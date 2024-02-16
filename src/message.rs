@@ -87,6 +87,30 @@ pub enum Inbound {
     Client(ClientInbound),
 }
 
+pub enum Target {
+    Producer { producer_id: u64 },
+    Consumer { consumer_id: u64 },
+}
+
+impl Inbound {
+    pub fn get_target(&self) -> Option<Target> {
+        match self {
+            Inbound::Client(ClientInbound::SendReceipt { producer_id, .. }) => {
+                Some(Target::Producer {
+                    producer_id: *producer_id,
+                })
+            }
+            Inbound::Client(ClientInbound::Message { consumer_id, .. })
+            | Inbound::Client(ClientInbound::AckResponse { consumer_id, .. }) => {
+                Some(Target::Consumer {
+                    consumer_id: *consumer_id,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 impl Resolvable for Inbound {
     fn resolver_id(&self) -> Option<ResolverKey> {
         match self {
@@ -344,8 +368,7 @@ impl TryFrom<&Message> for EngineInbound {
 #[derive(Debug, Clone)]
 pub enum ClientInbound {
     Message {
-        producer_id: u64,
-        sequence_id: u64,
+        consumer_id: u64,
         message_id: MessageIdData,
         payload: Vec<u8>,
     },
@@ -377,14 +400,12 @@ pub enum ClientInbound {
 impl Resolvable for ClientInbound {
     fn resolver_id(&self) -> Option<ResolverKey> {
         match self {
-            ClientInbound::Message {
-                producer_id,
-                sequence_id,
-                ..
-            } => Some(format!("{producer_id}:{sequence_id}")),
             ClientInbound::LookupTopic { request_id, .. } => Some(format!("LOOKUP:{request_id}")),
             ClientInbound::Success { request_id } => Some(format!("SUCCESS:{request_id}")),
-            ClientInbound::AckResponse { request_id, .. } => Some(format!("ACK:{request_id}")),
+            ClientInbound::AckResponse {
+                request_id,
+                consumer_id,
+            } => Some(format!("ACK:{consumer_id}:{request_id}")),
             ClientInbound::ProducerSuccess { request_id, .. } => {
                 Some(format!("PRODUCER:{request_id}"))
             }
@@ -393,6 +414,7 @@ impl Resolvable for ClientInbound {
                 sequence_id,
                 ..
             } => Some(format!("SEND:{producer_id}:{sequence_id}")),
+            _ => None,
         }
     }
 }
@@ -404,12 +426,11 @@ impl TryFrom<&Message> for ClientInbound {
             proto::pulsar::base_command::Type::MESSAGE => {
                 let message_id = message.command.message.message_id.clone().unwrap();
                 let payload = message.payload.as_ref().unwrap().data.clone();
-                let producer_id = message.command.message.consumer_id();
+                let consumer_id = message.command.message.consumer_id();
                 Ok(ClientInbound::Message {
                     message_id,
                     payload,
-                    producer_id,
-                    sequence_id: 0,
+                    consumer_id,
                 })
             }
             proto::pulsar::base_command::Type::LOOKUP_RESPONSE => {
@@ -547,7 +568,7 @@ impl Resolvable for ClientOutbound {
             ClientOutbound::Subscribe { request_id, .. } => Some(format!("SUCCESS:{request_id}")),
             ClientOutbound::Ack(acks) => {
                 let ack = acks.first().unwrap();
-                Some(format!("ACK:{}", ack.request_id))
+                Some(format!("ACK:{}:{}", ack.consumer_id, ack.request_id))
             }
             ClientOutbound::Producer { request_id, .. } => Some(format!("PRODUCER:{request_id}")),
             _ => None,
@@ -574,7 +595,8 @@ impl Into<Message> for ClientOutbound {
             }
             ClientOutbound::Ack(acks) => {
                 let mut ack = proto::pulsar::CommandAck::new();
-                ack.set_consumer_id(0);
+                let first = acks.first().unwrap();
+                ack.set_consumer_id(first.consumer_id);
 
                 if acks.len() > 1 {
                     ack.set_ack_type(proto::pulsar::command_ack::AckType::Cumulative);
