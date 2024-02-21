@@ -522,6 +522,7 @@ pub struct Ack {
 #[derive(Debug, Clone)]
 pub enum ClientOutbound {
     Send {
+        topic: String,
         producer_name: String,
         producer_id: u64,
         sequence_id: u64,

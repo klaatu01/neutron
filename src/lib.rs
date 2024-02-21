@@ -1,7 +1,9 @@
 mod auth;
+mod client_manager;
 mod codec;
 mod combinators;
 mod connection;
+mod connection_manager;
 mod consumer;
 mod engine;
 mod error;

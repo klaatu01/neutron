@@ -1,4 +1,5 @@
 use crate::codec::Codec;
+use crate::connection_manager::BrokerAddress;
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
 use crate::message::{Inbound, Message, Outbound};
@@ -68,13 +69,13 @@ impl ConnectionStream {
 }
 
 impl PulsarConnection {
-    pub async fn connect(host: &String, port: &u16, tls: bool) -> Result<Self, NeutronError> {
-        let addr = format!("{}:{}", host, port);
-
-        let stream = TcpStream::connect(addr.clone()).await.map_err(|e| {
-            log::warn!("Error: {}", e);
-            NeutronError::ConnectionFailed
-        })?;
+    pub async fn connect(broker_address: BrokerAddress, tls: bool) -> Result<Self, NeutronError> {
+        let stream = TcpStream::connect(broker_address.clone())
+            .await
+            .map_err(|e| {
+                log::warn!("Error: {}", e);
+                NeutronError::ConnectionFailed
+            })?;
 
         let stream = if tls {
             let mut root_cert_store = RootCertStore::empty();
@@ -83,7 +84,7 @@ impl PulsarConnection {
                 .with_root_certificates(root_cert_store)
                 .with_no_client_auth();
             let connector = TlsConnector::from(Arc::new(config));
-            let dns_name = ServerName::try_from(addr).unwrap();
+            let dns_name = ServerName::try_from(broker_address).unwrap();
             let stream = connector.connect(dns_name, stream).await;
             match stream {
                 Ok(stream) => ConnectionStream::Tls(tokio_util::codec::Framed::new(stream, Codec)),
