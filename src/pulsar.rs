@@ -393,12 +393,12 @@ impl PulsarBuilder {
     pub fn build(self) -> Pulsar {
         Pulsar {
             config: self.config.unwrap(),
-            socket_connection: None,
             resolver_manager: ResolverManager::new(),
-            client_connection: Mutex::new(Vec::new()),
             inbound_buffer: Mutex::new(Vec::new()),
             registration_manager_connection: None,
             auth_plugin: self.auth_plugin,
+            client_manager: Mutex::new(ClientManager::new()),
+            connection_manager: Mutex::new(ConnectionManager::new()),
         }
     }
 }
@@ -437,7 +437,6 @@ impl PulsarManager {
                 consumer_id: config.consumer_id,
                 topic: config.topic.clone(),
                 connection: consumer_connection,
-                broker_address: None,
             }))
             .await
             .map_err(|_| NeutronError::ChannelTerminated)?;
@@ -457,7 +456,6 @@ impl PulsarManager {
                 producer_id: config.producer_id,
                 topic: config.topic.clone(),
                 connection: producer_connection,
-                broker_address: None,
             }))
             .await
             .map_err(|_| NeutronError::ChannelTerminated)?;
