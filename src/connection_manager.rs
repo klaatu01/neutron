@@ -60,6 +60,13 @@ impl ConnectionManager {
         self.connections.insert(broker_address, connection);
     }
 
+    pub fn get_connection(
+        &self,
+        broker_address: &str,
+    ) -> Option<&EngineConnection<Outbound, Inbound>> {
+        self.connections.get(broker_address)
+    }
+
     pub fn remove_connection(&mut self, broker_address: &str) {
         self.connections.remove(broker_address);
     }

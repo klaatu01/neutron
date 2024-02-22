@@ -69,7 +69,7 @@ impl ClientManager {
         self.clients.is_empty()
     }
 
-    pub async fn next_message(&self) -> (BrokerAddress, Result<Outbound, NeutronError>) {
+    pub async fn next(&self) -> (BrokerAddress, Result<Outbound, NeutronError>) {
         let (next, _, _) = futures::future::select_all(self.clients.iter().map(|client| {
             async {
                 let connection = client.get_connection();
@@ -126,5 +126,18 @@ impl ClientManager {
         futures::future::join_all(clients).await;
 
         Ok(())
+    }
+
+    pub fn update_broker_address_for_topic(&mut self, topic: &str, broker_address: &str) {
+        for mut client in self.clients.iter_mut() {
+            match &mut client {
+                Client::Producer(data) | Client::Consumer(data) => {
+                    if data.topic == topic {
+                        println!("Updating broker address for topic: {}", topic);
+                        data.broker_address = broker_address.to_string();
+                    }
+                }
+            }
+        }
     }
 }

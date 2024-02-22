@@ -70,6 +70,11 @@ impl ConnectionStream {
 
 impl PulsarConnection {
     pub async fn connect(broker_address: BrokerAddress, tls: bool) -> Result<Self, NeutronError> {
+        let broker_address = broker_address
+            .trim_start_matches("pulsar://")
+            .trim_start_matches("pulsar+ssl://")
+            .to_string();
+
         let stream = TcpStream::connect(broker_address.clone())
             .await
             .map_err(|e| {

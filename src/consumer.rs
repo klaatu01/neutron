@@ -674,7 +674,7 @@ mod tests {
             mock_server
         );
         match consumer_start_result {
-            Err(NeutronError::ChannelTerminated) => assert!(true),
+            Err(e) if e.is_disconnect() => assert!(true),
             _ => assert!(false),
         }
         assert!(mock_server_result.is_ok());
