@@ -27,7 +27,7 @@ impl Into<Vec<u8>> for Data {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let pulsar_config = neutron::PulsarConfig {
-        endpoint_url: "127.0.0.1".to_string(),
+        endpoint_url: "pulsar://127.0.0.1".to_string(),
         endpoint_port: 6650,
     };
 
@@ -46,7 +46,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let data = Data {
             name: Utc::now().to_rfc3339(),
         };
-        producer.send(data).await?;
+        if let Err(e) = producer.send(data).await {
+            log::error!("Error sending message: {}", e);
+            break;
+        }
     }
 
     Ok(())

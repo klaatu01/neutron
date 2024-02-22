@@ -1,6 +1,8 @@
 use std::sync::atomic::AtomicU64;
 
+use crate::client_manager::ClientManager;
 use crate::connection::PulsarConnection;
+use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
 use crate::message::{
@@ -9,7 +11,6 @@ use crate::message::{
 use crate::resolver_manager::ResolverManager;
 use crate::{AuthenticationPlugin, ConsumerConfig, ProducerConfig};
 use futures::lock::Mutex;
-use futures::FutureExt;
 
 #[derive(Clone)]
 pub struct PulsarConfig {
@@ -17,43 +18,47 @@ pub struct PulsarConfig {
     pub endpoint_port: u16,
 }
 
+impl PulsarConfig {
+    pub fn broker_address(&self) -> BrokerAddress {
+        format!("{}:{}", self.endpoint_url, self.endpoint_port)
+    }
+
+    pub fn is_tls(&self) -> bool {
+        self.endpoint_url.starts_with("pulasr+ssl://")
+    }
+}
+
 pub struct Pulsar {
     #[allow(dead_code)]
     pub(crate) config: PulsarConfig,
-    pub(crate) socket_connection: Option<EngineConnection<Outbound, Inbound>>,
     pub(crate) resolver_manager: ResolverManager<Inbound>,
-    pub(crate) client_connection: Mutex<Vec<PulsarManagerRegistration>>,
-    pub(crate) inbound_buffer: Mutex<Vec<Inbound>>,
+    pub(crate) inbound_buffer: Mutex<Vec<(BrokerAddress, Result<Inbound, NeutronError>)>>,
     pub(crate) registration_manager_connection:
         Option<EngineConnection<(), PulsarManagerRegistration>>,
     pub(crate) auth_plugin: Option<Box<dyn AuthenticationPlugin + Sync + Send + 'static>>,
+    pub(crate) client_manager: Mutex<ClientManager>,
+    pub(crate) connection_manager: Mutex<ConnectionManager>,
 }
 
 type ResultInbound = Result<Inbound, NeutronError>;
 type ResultOutbound = Result<Outbound, NeutronError>;
 
-fn is_disconnect<T>(result: &Result<T, NeutronError>) -> bool {
-    match result {
-        Err(e) => e.is_disconnect(),
-        _ => false,
-    }
-}
-
 impl Pulsar {
     pub fn new(config: PulsarConfig) -> Self {
         Self {
             config,
-            socket_connection: None,
             resolver_manager: ResolverManager::new(),
-            client_connection: Mutex::new(Vec::new()),
             inbound_buffer: Mutex::new(Vec::new()),
             registration_manager_connection: None,
+            client_manager: Mutex::new(ClientManager::new()),
+            connection_manager: Mutex::new(ConnectionManager::new()),
             auth_plugin: None,
         }
     }
 
     pub async fn send_and_resolve(
         &self,
+        broker_address: &BrokerAddress,
         socket_connection: &EngineConnection<Outbound, Inbound>,
         outbound: &ResultOutbound,
     ) -> ResultInbound {
@@ -73,10 +78,10 @@ impl Pulsar {
                                         if self.resolver_manager.try_resolve(&inbound).await {
                                             return Ok(inbound);
                                         }
-                                        self.inbound_buffer.lock().await.push(inbound);
+                                        self.inbound_buffer.lock().await.push((broker_address.to_string(), Ok(inbound)));
                                     }
                                     Err(e) => {
-                                        return Err(e)
+                                        self.inbound_buffer.lock().await.push((broker_address.to_string(), Err(e)));
                                     }
                                 }
                             }
@@ -92,116 +97,103 @@ impl Pulsar {
         }
     }
 
-    pub(crate) async fn handle_socket_connection_inbound(
-        &self,
-        client_connections: &Vec<PulsarManagerRegistration>,
-        socket_connection: &EngineConnection<Outbound, Inbound>,
-        inbound: &ResultInbound,
-    ) -> Result<(), NeutronError> {
-        match inbound {
-            Ok(inbound_cmd) => match inbound_cmd {
-                Inbound::Connection(ConnectionInbound::Ping) => {
-                    socket_connection
-                        .send(Ok(Outbound::Connection(ConnectionOutbound::Pong)))
-                        .await
-                        .unwrap();
-                }
-                Inbound::Engine(EngineInbound::AuthChallenge) => {
-                    if let Some(auth_plugin) = &self.auth_plugin {
-                        let auth_data = auth_plugin.auth_data().await?;
-                        socket_connection
-                            .send(Ok(Outbound::Engine(EngineOutbound::AuthChallenge {
-                                auth_data,
-                            })))
-                            .await?;
-                    } else {
-                        Err(NeutronError::AuthenticationFailed(
-                            "No auth plugin provided, but auth challenge received".to_string(),
-                        ))?;
-                    }
-                }
-                inbound => {
-                    let target = inbound.get_target();
-                    match target {
-                        Some(crate::message::Target::Producer { producer_id }) => {
-                            for client_connection in client_connections {
-                                if client_connection.is_producer()
-                                    && client_connection.get_id() == producer_id
-                                {
-                                    client_connection
-                                        .get_connection()
-                                        .send(Ok(inbound.clone()))
-                                        .await
-                                        .unwrap();
-                                }
-                            }
-                        }
-                        Some(crate::message::Target::Consumer { consumer_id }) => {
-                            log::info!("Consumer inbound: {:?}", inbound);
-                            for client_connection in client_connections {
-                                if client_connection.is_consumer()
-                                    && client_connection.get_id() == consumer_id
-                                {
-                                    client_connection
-                                        .get_connection()
-                                        .send(Ok(inbound.clone()))
-                                        .await
-                                        .unwrap();
-                                }
-                            }
-                        }
-                        None => {
-                            for client_connection in client_connections {
-                                client_connection
-                                    .get_connection()
-                                    .send(Ok(inbound.clone()))
-                                    .await
-                                    .unwrap();
-                            }
-                        }
-                    }
-                }
-            },
-            Err(inbound_err) => match inbound_err {
-                NeutronError::Disconnected => {
-                    for client_connection in client_connections {
-                        client_connection
-                            .get_connection()
-                            .send(Err(NeutronError::Disconnected))
-                            .await
-                            .unwrap();
-                    }
-                }
-                _ => (),
-            },
-        }
-        Ok(())
-    }
-
     pub(crate) async fn handle_registration(
         &self,
         registration_manager: &EngineConnection<(), PulsarManagerRegistration>,
         registration: PulsarManagerRegistration,
     ) {
-        self.client_connection.lock().await.push(registration);
+        let client = match registration {
+            PulsarManagerRegistration::Producer {
+                producer_id,
+                topic,
+                connection,
+            } => crate::client_manager::Client::Producer(crate::client_manager::ClientData {
+                id: producer_id,
+                topic,
+                connection,
+                broker_address: self.config.broker_address(),
+            }),
+            PulsarManagerRegistration::Consumer {
+                consumer_id,
+                topic,
+                connection,
+            } => crate::client_manager::Client::Consumer(crate::client_manager::ClientData {
+                id: consumer_id,
+                topic,
+                connection,
+                broker_address: self.config.broker_address(),
+            }),
+        };
+        self.client_manager.lock().await.add_client(client);
         registration_manager.send(Ok(())).await.unwrap();
     }
 
-    pub async fn handle_client_connection_outbound(
+    pub async fn handle_client_outbound(
         &self,
-        _client_connection: &EngineConnection<Inbound, Outbound>,
-        socket_connection: &EngineConnection<Outbound, Inbound>,
+        broker_address: &str,
         outbound: &ResultOutbound,
     ) -> Result<(), NeutronError> {
-        socket_connection.send(outbound.clone()).await
+        if let Ok(Outbound::Client(crate::message::ClientOutbound::LookupTopic { topic, .. })) =
+            outbound
+        {
+            let broker_address = self.config.broker_address();
+            let inbound = {
+                let connection = self.connection_manager.lock().await;
+                let connection = connection
+                    .get_connection(&broker_address)
+                    .ok_or(NeutronError::Disconnected)?;
+                self.send_and_resolve(&broker_address, connection, outbound)
+                    .await?
+            };
+            if let Inbound::Client(crate::message::ClientInbound::LookupTopic {
+                response,
+                broker_service_url,
+                broker_service_url_tls,
+                ..
+            }) = &inbound
+            {
+                if response == &crate::message::proto::pulsar::command_lookup_topic_response::LookupType::Redirect {
+                    let (broker_address, is_tls) = if broker_service_url != "" {
+                        (broker_service_url, false)
+                    } else if broker_service_url_tls != "" {
+                        (broker_service_url_tls, true)
+                    } else {
+                        panic!("No broker service url provided");
+                    };
+                    println!("Connecting to new broker: {}", broker_address);
+                    self.connect(broker_address.to_string(), is_tls).await?;
+                    self.client_manager.lock().await.update_broker_address_for_topic(&topic, &broker_address);
+                    self.client_manager
+                        .lock()
+                        .await
+                        .send(&inbound, &broker_address)
+                        .await?;
+                    return Ok(());
+                }
+                self.client_manager
+                    .lock()
+                    .await
+                    .send(&inbound, &broker_address)
+                    .await?;
+                return Ok(());
+            }
+        };
+        self.connection_manager
+            .lock()
+            .await
+            .send(outbound.clone(), broker_address.to_string())
+            .await
     }
 
-    pub async fn connect(&self) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
-        let connection_engine =
-            PulsarConnection::connect(&self.config.endpoint_url, &self.config.endpoint_port, false)
-                .await?
-                .run()
-                .await;
+    pub async fn connect(
+        &self,
+        broker_address: BrokerAddress,
+        is_tls: bool,
+    ) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
+        let connection_engine = PulsarConnection::connect(broker_address.clone(), is_tls)
+            .await?
+            .run()
+            .await;
         let auth_data = if let Some(auth_plugin) = &self.auth_plugin {
             Some(auth_plugin.auth_data().await?)
         } else {
@@ -209,6 +201,7 @@ impl Pulsar {
         };
         let _ = self
             .send_and_resolve(
+                &broker_address,
                 &connection_engine,
                 &Ok(Outbound::Engine(crate::message::EngineOutbound::Connect {
                     auth_data,
@@ -218,76 +211,128 @@ impl Pulsar {
         Ok(connection_engine)
     }
 
+    pub(crate) async fn handle_connection_inbound(
+        &self,
+        broker_address: &BrokerAddress,
+        inbound: &ResultInbound,
+    ) -> Result<(), NeutronError> {
+        match inbound {
+            Ok(inbound_cmd) => match inbound_cmd {
+                Inbound::Connection(ConnectionInbound::Ping) => {
+                    self.connection_manager
+                        .lock()
+                        .await
+                        .send(
+                            Ok(Outbound::Connection(ConnectionOutbound::Pong)),
+                            broker_address.to_string(),
+                        )
+                        .await?;
+                }
+                Inbound::Engine(EngineInbound::AuthChallenge) => {
+                    if let Some(auth_plugin) = &self.auth_plugin {
+                        let auth_data = auth_plugin.auth_data().await?;
+                        self.connection_manager
+                            .lock()
+                            .await
+                            .send(
+                                Ok(Outbound::Engine(EngineOutbound::AuthChallenge {
+                                    auth_data,
+                                })),
+                                broker_address.to_string(),
+                            )
+                            .await?;
+                    } else {
+                        Err(NeutronError::AuthenticationFailed(
+                            "No auth plugin provided, but auth challenge received".to_string(),
+                        ))?;
+                    }
+                }
+                inbound => {
+                    self.client_manager
+                        .lock()
+                        .await
+                        .send(inbound, &broker_address)
+                        .await?;
+                }
+            },
+            Err(inbound_err) => {
+                self.client_manager
+                    .lock()
+                    .await
+                    .send_all(&Err(inbound_err.clone()))
+                    .await?
+            }
+        }
+        Ok(())
+    }
+
     pub async fn next(&mut self) -> bool {
-        let mut registration: Option<Result<PulsarManagerRegistration, NeutronError>> = None;
+        let mut _registration: Option<Result<PulsarManagerRegistration, NeutronError>> = None;
+        let mut _inbound: Option<(BrokerAddress, Result<Inbound, NeutronError>)> = None;
+        let mut _outbound: Option<(BrokerAddress, Result<Outbound, NeutronError>)> = None;
         match (
-            &self.client_connection.lock().await,
-            &self.socket_connection,
+            &self.connection_manager.lock().await,
+            &self.client_manager.lock().await,
             &self.registration_manager_connection,
         ) {
-            (
-                // where the vec is not empty
-                client_connections,
-                Some(socket_connection),
-                Some(registration_manager_connection),
-            ) if !client_connections.is_empty() => {
+            (connection_manager, client_manager, Some(registration_manager_connection))
+                if !client_manager.is_empty() && !connection_manager.is_empty() =>
+            {
                 if let Some(inbound) = self.inbound_buffer.lock().await.pop() {
-                    self.handle_socket_connection_inbound(
-                        &client_connections,
-                        &socket_connection,
-                        &Ok(inbound),
-                    )
-                    .await
-                    .unwrap();
-                    return false;
+                    _inbound = Some(inbound);
+                } else {
+                    tokio::select! {
+                        outbound = client_manager.next() => {
+                            _outbound = Some(outbound);
+                        }
+                        inbound = connection_manager.next() => {
+                            _inbound = Some(inbound);
+                        }
+                        new_registration = registration_manager_connection.recv() => {
+                            log::info!("Registration received");
+                            _registration = Some(new_registration);
+                        }
+                    }
                 }
-                let client_connection_futures = futures::future::select_all(
-                    client_connections
-                        .iter()
-                        .map(|x| async { x.get_connection().recv().await }.boxed()),
-                );
-                tokio::select! {
-                    (outbound, index, _) = client_connection_futures => {
-                        if is_disconnect(&outbound) {
-                            log::debug!("Client connection disconnected");
-                            socket_connection.send(Err(NeutronError::Disconnected)).await.unwrap();
-                        }
-                        if let Some(client_connection) = client_connections.get(index) {
-                            self.handle_client_connection_outbound(&client_connection.get_connection(), &socket_connection, &outbound).await.unwrap();
-                        }
-                    }
-                    inbound = socket_connection.recv() => {
-                        if is_disconnect(&inbound) {
-                            log::debug!("Connection engine disconnected");
-                            return true;
-                        }
-                        self.handle_socket_connection_inbound(&client_connections, &socket_connection, &inbound).await.unwrap();
-                    }
-                    new_registration = registration_manager_connection.recv() => {
-                        log::info!("Registration received");
-                        registration = Some(new_registration);
-                    }
-                };
-                ()
             }
-            (client_connections, _, Some(registration_manager_connection))
-                if client_connections.is_empty() =>
+            (_, client_manager, Some(registration_manager_connection))
+                if client_manager.is_empty() =>
             {
                 log::info!("Awaiting Registration");
-                registration = Some(registration_manager_connection.recv().await);
+                _registration = Some(registration_manager_connection.recv().await);
+                log::info!("Registration received");
             }
             _ => {
                 log::error!("Connection engine or client connection is None");
                 return true;
             }
-        }
+        };
         if let (Some(registration_manager_connection), Some(registration)) =
-            (&self.registration_manager_connection, registration)
+            (&self.registration_manager_connection, _registration)
         {
             self.handle_registration(&registration_manager_connection, registration.unwrap())
                 .await;
+            return false;
         }
-        false
+        if let Some((broker_address, inbound)) = _inbound {
+            if let Err(e) = &inbound {
+                log::error!("Inbound error: {}", e);
+                if e.is_disconnect() {
+                    return true;
+                }
+            }
+            self.handle_connection_inbound(&broker_address, &inbound)
+                .await
+                .unwrap();
+            return false;
+        }
+        if let Some((broker_address, outbound)) = _outbound {
+            self.handle_client_outbound(&broker_address, &outbound)
+                .await
+                .unwrap();
+            return false;
+        }
+        true
     }
 
     async fn start_pulsar(
@@ -295,11 +340,15 @@ impl Pulsar {
         registration_manager_connection: EngineConnection<(), PulsarManagerRegistration>,
     ) {
         self.registration_manager_connection = Some(registration_manager_connection);
-        let inbound = self.connect().await;
-        match inbound {
-            Ok(inbound) => {
-                self.socket_connection = Some(inbound);
-            }
+        let connection = self
+            .connect(self.config.broker_address(), self.config.is_tls())
+            .await;
+        match connection {
+            Ok(connection) => self
+                .connection_manager
+                .lock()
+                .await
+                .add_connection(self.config.broker_address(), connection),
             Err(e) => {
                 log::error!("Failed to connect to pulsar broker: {}", e);
                 return;
@@ -389,12 +438,12 @@ impl PulsarBuilder {
     pub fn build(self) -> Pulsar {
         Pulsar {
             config: self.config.unwrap(),
-            socket_connection: None,
             resolver_manager: ResolverManager::new(),
-            client_connection: Mutex::new(Vec::new()),
             inbound_buffer: Mutex::new(Vec::new()),
             registration_manager_connection: None,
             auth_plugin: self.auth_plugin,
+            client_manager: Mutex::new(ClientManager::new()),
+            connection_manager: Mutex::new(ConnectionManager::new()),
         }
     }
 }
