@@ -12,6 +12,7 @@ pub enum NeutronError {
     SerializationFailed,
     AuthenticationFailed(String),
     ConnectionFailed,
+    InvalidUrl,
 }
 
 impl NeutronError {
@@ -39,6 +40,7 @@ impl std::fmt::Display for NeutronError {
             NeutronError::SerializationFailed => write!(f, "Serialization failed"),
             NeutronError::AuthenticationFailed(e) => write!(f, "Authentication failed: {}", e),
             NeutronError::ConnectionFailed => write!(f, "Connection failed"),
+            NeutronError::InvalidUrl => write!(f, "Invalid URL"),
         }
     }
 }

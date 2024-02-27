@@ -24,7 +24,7 @@ impl PulsarConfig {
     }
 
     pub fn is_tls(&self) -> bool {
-        self.endpoint_url.starts_with("pulasr+ssl://")
+        self.endpoint_url.starts_with("pulsar+ssl://")
     }
 }
 
@@ -157,24 +157,20 @@ impl Pulsar {
                 ..
             }) = &inbound
             {
-                if response == &crate::message::proto::pulsar::command_lookup_topic_response::LookupType::Redirect {
-                    let (broker_address, is_tls) = if broker_service_url != "" {
-                        (broker_service_url, false)
-                    } else if broker_service_url_tls != "" {
-                        (broker_service_url_tls, true)
-                    } else {
-                        panic!("No broker service url provided");
-                    };
-                    println!("Connecting to new broker: {}", broker_address);
-                    self.connect(broker_address.to_string(), is_tls).await?;
-                    self.client_manager.lock().await.update_broker_address_for_topic(&topic, &broker_address);
-                    self.client_manager
-                        .lock()
-                        .await
-                        .send(&inbound, &broker_address)
-                        .await?;
-                    return Ok(Some(()));
-                }
+                log::debug!("Topic lookup response: {:?}", inbound);
+                let (broker_address, is_tls) = if broker_service_url != "" {
+                    (broker_service_url, false)
+                } else if broker_service_url_tls != "" {
+                    (broker_service_url_tls, true)
+                } else {
+                    panic!("No broker service url provided");
+                };
+                println!("Connecting to new broker: {}", broker_address);
+                self.connect(broker_address.to_string(), is_tls).await?;
+                self.client_manager
+                    .lock()
+                    .await
+                    .update_broker_address_for_topic(&topic, &broker_address);
                 self.client_manager
                     .lock()
                     .await
@@ -210,10 +206,13 @@ impl Pulsar {
             .await?
             .run()
             .await;
-        let auth_data = if let Some(auth_plugin) = &self.auth_plugin {
-            Some(auth_plugin.auth_data().await?)
+        let (auth_data, auth_method_name) = if let Some(auth_plugin) = &self.auth_plugin {
+            (
+                Some(auth_plugin.auth_data().await?),
+                Some(auth_plugin.auth_method_name()),
+            )
         } else {
-            None
+            (None, None)
         };
         let _ = self
             .send_and_resolve(
@@ -221,6 +220,7 @@ impl Pulsar {
                 &connection_engine,
                 &Ok(Outbound::Engine(crate::message::EngineOutbound::Connect {
                     auth_data,
+                    auth_method_name,
                 })),
             )
             .await;
