@@ -11,6 +11,7 @@ mod message;
 mod producer;
 mod pulsar;
 mod resolver_manager;
+mod resolver_manager_v2;
 
 pub use auth::*;
 pub use consumer::*;

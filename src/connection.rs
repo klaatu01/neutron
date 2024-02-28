@@ -11,6 +11,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 use tokio_util::codec::Framed;
+use url::Url;
 
 pub enum ConnectionStream {
     Tcp(Framed<TcpStream, Codec>),
@@ -70,12 +71,17 @@ impl ConnectionStream {
 
 impl PulsarConnection {
     pub async fn connect(broker_address: BrokerAddress, tls: bool) -> Result<Self, NeutronError> {
-        let broker_address = broker_address
-            .trim_start_matches("pulsar://")
-            .trim_start_matches("pulsar+ssl://")
-            .to_string();
+        let broker_url = Url::parse(&broker_address).map_err(|_| NeutronError::InvalidUrl)?;
+        log::info!("Connecting to {}", broker_url);
 
-        let stream = TcpStream::connect(broker_address.clone())
+        let host = broker_url
+            .host_str()
+            .ok_or(NeutronError::InvalidUrl)?
+            .to_owned();
+
+        let port = broker_url.port().ok_or(NeutronError::InvalidUrl)?;
+
+        let stream = TcpStream::connect(format!("{}:{}", &host, &port))
             .await
             .map_err(|e| {
                 log::warn!("Error: {}", e);
@@ -83,13 +89,15 @@ impl PulsarConnection {
             })?;
 
         let stream = if tls {
+            log::info!("TLS enabled");
             let mut root_cert_store = RootCertStore::empty();
             root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let config = ClientConfig::builder()
                 .with_root_certificates(root_cert_store)
                 .with_no_client_auth();
             let connector = TlsConnector::from(Arc::new(config));
-            let dns_name = ServerName::try_from(broker_address).unwrap();
+            log::info!("Connecting to {}", broker_address);
+            let dns_name = ServerName::try_from(host).unwrap();
             let stream = connector.connect(dns_name, stream).await;
             match stream {
                 Ok(stream) => ConnectionStream::Tls(tokio_util::codec::Framed::new(stream, Codec)),
@@ -121,6 +129,9 @@ impl PulsarConnection {
                         }
                         Err(e) => {
                             log::warn!("{}", e);
+                            if e.is_disconnect() {
+                                break;
+                            }
                         }
                     }
                 },
@@ -131,8 +142,11 @@ impl PulsarConnection {
                             Err(NeutronError::Disconnected)
                         }
                         Some(Ok(message)) =>
-                                Inbound::try_from(&message)
-                                    .map_err(|_| NeutronError::UnsupportedCommand),
+                            Inbound::try_from(&message)
+                                .map_err(|_| {
+                                    log::warn!("Unsupported command: {:?}", message.command.type_());
+                                    NeutronError::UnsupportedCommand
+                                }),
                         Some(Err(e)) => {
                             log::warn!("Error: {}", e);
                             Err(NeutronError::DecodeFailed)

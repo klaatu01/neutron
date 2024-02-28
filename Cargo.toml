@@ -25,6 +25,8 @@ chrono = "0.4.33"
 oauth2 = "4.4.2"
 tokio-rustls = "0.25.0"
 webpki-roots = "0.26.1"
+base64 = "0.21.7"
+reqwest = { version = "0.11.24", features = ["rustls", "json"] }
 
 [build-dependencies]
 protobuf-codegen = "3.3.0"

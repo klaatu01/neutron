@@ -127,6 +127,7 @@ impl ToString for Inbound {
             "<- {}",
             match self {
                 Inbound::Connection(command) => format!("{:?}", command.base_command()),
+                Inbound::Engine(EngineInbound::Error(e)) => format!("ERROR: {}", e),
                 Inbound::Engine(command) => format!("{:?}", command.base_command()),
                 Inbound::Client(command) => format!("{:?}", command.base_command()),
             }
@@ -251,20 +252,28 @@ impl Resolvable for ConnectionOutbound {
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum EngineOutbound {
-    Connect { auth_data: Option<Vec<u8>> },
-    AuthChallenge { auth_data: Vec<u8> },
+    Connect {
+        auth_data: Option<Vec<u8>>,
+        auth_method_name: Option<String>,
+    },
+    AuthChallenge {
+        auth_data: Vec<u8>,
+    },
 }
 
 impl Into<Message> for EngineOutbound {
     fn into(self) -> Message {
         match self {
-            EngineOutbound::Connect { auth_data } => {
+            EngineOutbound::Connect {
+                auth_data,
+                auth_method_name,
+            } => {
                 let mut connect = proto::pulsar::CommandConnect::new();
                 connect.set_client_version("0.0.1".to_string());
                 connect.set_protocol_version(21);
 
                 if let Some(v) = auth_data {
-                    connect.set_auth_method(proto::pulsar::AuthMethod::AuthMethodAthens);
+                    connect.set_auth_method_name(auth_method_name.unwrap_or("none".to_string()));
                     connect.set_auth_data(v.to_vec())
                 }
 
@@ -324,6 +333,7 @@ impl Resolvable for EngineOutbound {
 pub enum EngineInbound {
     Connected,
     AuthChallenge,
+    Error(String),
 }
 
 impl Resolvable for EngineInbound {
@@ -346,16 +356,21 @@ impl EngineInbound {
         match self {
             EngineInbound::Connected => proto::pulsar::base_command::Type::CONNECTED,
             EngineInbound::AuthChallenge => proto::pulsar::base_command::Type::AUTH_CHALLENGE,
+            EngineInbound::Error(_) => proto::pulsar::base_command::Type::ERROR,
         }
     }
 }
 
 impl TryFrom<&Message> for EngineInbound {
     type Error = std::io::Error;
-    fn try_from(message: &Message) -> Result<EngineInbound, Self::Error> {
+    fn try_from(message: &Message) -> Result<EngineInbound, std::io::Error> {
         match message.command.type_() {
             proto::pulsar::base_command::Type::CONNECTED => Ok(EngineInbound::Connected),
             proto::pulsar::base_command::Type::AUTH_CHALLENGE => Ok(EngineInbound::AuthChallenge),
+            proto::pulsar::base_command::Type::ERROR => {
+                let error = &message.command.error;
+                Ok(EngineInbound::Error(error.message().to_string()))
+            }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Unsupported command",
