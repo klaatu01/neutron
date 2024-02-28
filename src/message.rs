@@ -255,6 +255,7 @@ pub enum EngineOutbound {
     Connect {
         auth_data: Option<Vec<u8>>,
         auth_method_name: Option<String>,
+        proxy_url: Option<String>,
     },
     AuthChallenge {
         auth_data: Vec<u8>,
@@ -267,6 +268,7 @@ impl Into<Message> for EngineOutbound {
             EngineOutbound::Connect {
                 auth_data,
                 auth_method_name,
+                proxy_url,
             } => {
                 let mut connect = proto::pulsar::CommandConnect::new();
                 connect.set_client_version("0.0.1".to_string());
@@ -275,6 +277,10 @@ impl Into<Message> for EngineOutbound {
                 if let Some(v) = auth_data {
                     connect.set_auth_method_name(auth_method_name.unwrap_or("none".to_string()));
                     connect.set_auth_data(v.to_vec())
+                }
+
+                if let Some(url) = proxy_url {
+                    connect.set_proxy_to_broker_url(url);
                 }
 
                 let mut base = proto::pulsar::BaseCommand::new();
@@ -393,6 +399,7 @@ pub enum ClientInbound {
         broker_service_url_tls: String,
         response: proto::pulsar::command_lookup_topic_response::LookupType,
         authoritative: bool,
+        proxy: bool,
     },
     Success {
         request_id: u64,
@@ -455,12 +462,14 @@ impl TryFrom<&Message> for ClientInbound {
                 let broker_service_url_tls = lookup_topic.brokerServiceUrlTls().to_string();
                 let response = lookup_topic.response();
                 let authoritative = lookup_topic.authoritative();
+                let proxy = lookup_topic.proxy_through_service_url();
                 Ok(ClientInbound::LookupTopic {
                     request_id,
                     broker_service_url,
                     broker_service_url_tls,
                     response,
                     authoritative,
+                    proxy,
                 })
             }
             proto::pulsar::base_command::Type::SUCCESS => {
