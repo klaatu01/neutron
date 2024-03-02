@@ -1,16 +1,18 @@
 use std::sync::atomic::AtomicU64;
 
 use crate::client_manager::ClientManager;
+use crate::command_resolver::CommandResolver;
 use crate::connection::PulsarConnection;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
 use crate::message::proto::pulsar::command_lookup_topic_response::LookupType;
+use crate::message::Command;
 use crate::message::{
     ConnectionInbound, ConnectionOutbound, EngineInbound, EngineOutbound, Inbound, Outbound,
 };
 use crate::resolver_manager::ResolverManager;
-use crate::{AuthenticationPlugin, ConsumerConfig, ProducerConfig};
+use crate::AuthenticationPlugin;
 use futures::lock::Mutex;
 use url::Url;
 
@@ -33,10 +35,8 @@ impl PulsarConfig {
 pub struct Pulsar {
     #[allow(dead_code)]
     pub(crate) config: PulsarConfig,
-    pub(crate) resolver_manager: ResolverManager<Inbound>,
     pub(crate) inbound_buffer: Mutex<Vec<(BrokerAddress, Result<Inbound, NeutronError>)>>,
-    pub(crate) registration_manager_connection:
-        Option<EngineConnection<(), PulsarManagerRegistration>>,
+    pub(crate) registration_manager_connection: Option<EngineConnection<(), ClientRegistration>>,
     pub(crate) auth_plugin: Option<Box<dyn AuthenticationPlugin + Sync + Send + 'static>>,
     pub(crate) client_manager: Mutex<ClientManager>,
     pub(crate) connection_manager: Mutex<ConnectionManager>,
@@ -48,7 +48,7 @@ type ResultOutbound = Result<Outbound, NeutronError>;
 enum Next {
     Inbound((BrokerAddress, ResultInbound)),
     Outbound((BrokerAddress, ResultOutbound)),
-    Registration(Result<PulsarManagerRegistration, NeutronError>),
+    Registration(Result<ClientRegistration, NeutronError>),
 }
 
 impl Pulsar {
@@ -107,11 +107,11 @@ impl Pulsar {
 
     pub(crate) async fn handle_registration(
         &self,
-        registration_manager: &EngineConnection<(), PulsarManagerRegistration>,
-        registration: PulsarManagerRegistration,
+        registration_manager: &EngineConnection<(), ClientRegistration>,
+        registration: ClientRegistration,
     ) {
         let client = match registration {
-            PulsarManagerRegistration::Producer {
+            ClientRegistration::Producer {
                 producer_id,
                 topic,
                 connection,
@@ -121,7 +121,7 @@ impl Pulsar {
                 connection,
                 broker_address: self.config.broker_address(),
             }),
-            PulsarManagerRegistration::Consumer {
+            ClientRegistration::Consumer {
                 consumer_id,
                 topic,
                 connection,
@@ -391,7 +391,7 @@ impl Pulsar {
 
     async fn start_pulsar(
         &mut self,
-        registration_manager_connection: EngineConnection<(), PulsarManagerRegistration>,
+        registration_manager_connection: EngineConnection<(), ClientRegistration>,
     ) {
         self.registration_manager_connection = Some(registration_manager_connection);
         let connection = self
@@ -426,44 +426,19 @@ impl Pulsar {
     }
 }
 
-pub(crate) enum PulsarManagerRegistration {
-    Producer {
-        producer_id: u64,
-        topic: String,
-        connection: EngineConnection<Inbound, Outbound>,
-    },
-    Consumer {
-        consumer_id: u64,
-        topic: String,
-        connection: EngineConnection<Inbound, Outbound>,
-    },
+pub(crate) struct ClientRegistration {
+    id: u64,
+    topic: String,
+    connection: EngineConnection<Inbound, Command<Outbound, Inbound>>,
 }
 
-impl PulsarManagerRegistration {
+impl ClientRegistration {
     pub fn get_id(&self) -> u64 {
-        match self {
-            PulsarManagerRegistration::Producer { producer_id, .. } => *producer_id,
-            PulsarManagerRegistration::Consumer { consumer_id, .. } => *consumer_id,
-        }
-    }
-    pub fn is_producer(&self) -> bool {
-        match self {
-            PulsarManagerRegistration::Producer { .. } => true,
-            _ => false,
-        }
-    }
-    pub fn is_consumer(&self) -> bool {
-        match self {
-            PulsarManagerRegistration::Consumer { .. } => true,
-            _ => false,
-        }
+        self.id
     }
 
-    pub fn get_connection(&self) -> &EngineConnection<Inbound, Outbound> {
-        match self {
-            PulsarManagerRegistration::Producer { connection, .. } => connection,
-            PulsarManagerRegistration::Consumer { connection, .. } => connection,
-        }
+    pub fn get_connection(&self) -> &EngineConnection<Inbound, Command<Outbound, Inbound>> {
+        &self.connection
     }
 }
 
@@ -507,58 +482,36 @@ impl PulsarBuilder {
 }
 
 pub struct PulsarManager {
-    producer_id_generator: AtomicU64,
-    consumer_id_generator: AtomicU64,
-    inner_connection: EngineConnection<PulsarManagerRegistration, ()>,
+    client_id_generator: AtomicU64,
+    inner_connection: EngineConnection<ClientRegistration, ()>,
 }
 
 impl PulsarManager {
-    pub fn new(inner_connection: EngineConnection<PulsarManagerRegistration, ()>) -> Self {
+    pub fn new(inner_connection: EngineConnection<ClientRegistration, ()>) -> Self {
         Self {
-            producer_id_generator: AtomicU64::new(0),
-            consumer_id_generator: AtomicU64::new(0),
+            client_id_generator: AtomicU64::new(0),
             inner_connection,
         }
     }
 
-    pub fn consumer_id(&self) -> u64 {
-        self.consumer_id_generator
+    pub fn new_client_id(&self) -> u64 {
+        self.client_id_generator
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
-    pub fn producer_id(&self) -> u64 {
-        self.producer_id_generator
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    }
-    pub async fn register_consumer(
+
+    pub async fn register(
         &self,
-        config: &ConsumerConfig,
-    ) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
+        topic: String,
+        client_id: u64,
+    ) -> Result<EngineConnection<crate::message::Command<Outbound, Inbound>, Inbound>, NeutronError>
+    {
         let (consumer_connection, connection) = EngineConnection::pair();
 
         self.inner_connection
-            .send(Ok(PulsarManagerRegistration::Consumer {
-                consumer_id: config.consumer_id,
-                topic: config.topic.clone(),
+            .send(Ok(ClientRegistration {
+                id: client_id,
+                topic: topic.clone(),
                 connection: consumer_connection,
-            }))
-            .await
-            .map_err(|_| NeutronError::ChannelTerminated)?;
-
-        self.inner_connection.recv().await?;
-        Ok(connection)
-    }
-
-    pub async fn register_producer(
-        &self,
-        config: &ProducerConfig,
-    ) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
-        let (producer_connection, connection) = EngineConnection::pair();
-
-        self.inner_connection
-            .send(Ok(PulsarManagerRegistration::Producer {
-                producer_id: config.producer_id,
-                topic: config.topic.clone(),
-                connection: producer_connection,
             }))
             .await
             .map_err(|_| NeutronError::ChannelTerminated)?;

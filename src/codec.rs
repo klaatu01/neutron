@@ -7,6 +7,7 @@ use nom::IResult;
 use protobuf::Message as _;
 
 use crate::message::proto::pulsar::{BaseCommand, MessageMetadata};
+use crate::messagev2::proto::pulsar::MessageMetadata;
 use crate::{error::NeutronError, message::Message};
 
 pub struct Codec;

@@ -1,67 +1,44 @@
 use futures::FutureExt;
 
 use crate::{
+    command_resolver::CommandResolver,
     connection_manager::BrokerAddress,
     engine::EngineConnection,
-    message::{Inbound, Outbound},
+    message::{Command, Inbound, Outbound},
     NeutronError,
 };
 
 pub struct ClientData {
     pub id: u64,
-    pub connection: EngineConnection<Inbound, Outbound>,
+    pub connection: EngineConnection<Inbound, Command<Outbound, Inbound>>,
     pub topic: String,
     pub broker_address: String,
 }
 
-pub enum Client {
-    Producer(ClientData),
-    Consumer(ClientData),
-}
-
-impl Client {
-    fn data(&self) -> &ClientData {
-        match self {
-            Client::Producer(data) => data,
-            Client::Consumer(data) => data,
-        }
-    }
-
-    fn get_connection(&self) -> &EngineConnection<Inbound, Outbound> {
-        &self.data().connection
+impl ClientData {
+    fn get_connection(&self) -> &EngineConnection<Inbound, Command<Outbound, Inbound>> {
+        &self.connection
     }
 
     fn broker_address(&self) -> &str {
-        &self.data().broker_address
-    }
-
-    fn is_producer(&self) -> bool {
-        match self {
-            Client::Producer(_) => true,
-            _ => false,
-        }
-    }
-
-    fn is_consumer(&self) -> bool {
-        match self {
-            Client::Consumer(_) => true,
-            _ => false,
-        }
+        &self.broker_address
     }
 }
 
 pub struct ClientManager {
-    clients: Vec<Client>,
+    clients: Vec<ClientData>,
+    pub(crate) command_resolver: CommandResolver<Outbound, Inbound>,
 }
 
 impl ClientManager {
     pub fn new() -> Self {
         ClientManager {
             clients: Vec::new(),
+            command_resolver: CommandResolver::new(),
         }
     }
 
-    pub fn add_client(&mut self, client: Client) {
+    pub fn add_client(&mut self, client: ClientData) {
         self.clients.push(client);
     }
 
@@ -80,7 +57,19 @@ impl ClientManager {
             .boxed()
         }))
         .await;
-        next
+
+        let outbound = match next.1 {
+            Ok(cmd) => match cmd {
+                Command::RequestResponse(outbound, sender) => {
+                    self.command_resolver.put(outbound.clone(), sender).await;
+                    Ok(outbound)
+                }
+                _ => Ok(cmd.get_outbound()),
+            },
+            Err(err) => Err(err),
+        };
+
+        (next.0, outbound)
     }
 
     pub async fn send(
@@ -88,21 +77,22 @@ impl ClientManager {
         inbound: &Inbound,
         broker_address: &BrokerAddress,
     ) -> Result<(), NeutronError> {
+        if self.command_resolver.try_resolve(inbound.clone()).await {
+            return Ok(());
+        }
+
+        let consumer_or_producer_id = inbound.try_consumer_or_producer_id();
+
         let clients = self
             .clients
             .iter()
             .filter(|client| client.broker_address() == broker_address)
-            .filter(|client| match inbound.get_target() {
-                Some(target) => match target {
-                    crate::message::Target::Producer { producer_id } if client.is_producer() => {
-                        client.data().id == producer_id
-                    }
-                    crate::message::Target::Consumer { consumer_id } if client.is_consumer() => {
-                        client.data().id == consumer_id
-                    }
-                    _ => false,
-                },
-                None => true,
+            .filter(|client| {
+                if let Some(id) = consumer_or_producer_id {
+                    client.id == id
+                } else {
+                    true
+                }
             });
 
         futures::future::join_all(clients.map(|client| async {
@@ -130,13 +120,9 @@ impl ClientManager {
 
     pub fn update_broker_address_for_topic(&mut self, topic: &str, broker_address: &str) {
         for mut client in self.clients.iter_mut() {
-            match &mut client {
-                Client::Producer(data) | Client::Consumer(data) => {
-                    if data.topic == topic {
-                        println!("Updating broker address for topic: {}", topic);
-                        data.broker_address = broker_address.to_string();
-                    }
-                }
+            if client.topic == topic {
+                println!("Updating broker address for topic: {}", topic);
+                client.broker_address = broker_address.to_string();
             }
         }
     }

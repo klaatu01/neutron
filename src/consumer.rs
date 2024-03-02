@@ -1,10 +1,7 @@
+use crate::client::Client;
 use crate::error::NeutronError;
 use crate::{
-    engine::EngineConnection,
-    message::{
-        proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
-    },
-    resolver_manager::{Resolver, ResolverManager},
+    message::{proto::pulsar::MessageIdData, Inbound, Outbound},
     PulsarManager,
 };
 use async_trait::async_trait;
@@ -12,8 +9,7 @@ use futures::lock::Mutex;
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use std::sync::atomic::AtomicU64;
-use tokio::sync::RwLock;
+use std::sync::atomic::AtomicU32;
 
 #[cfg(feature = "json")]
 pub trait ConsumerDataTrait: DeserializeOwned + Send + Sync + Clone {}
@@ -31,8 +27,6 @@ impl<T: TryFrom<Vec<u8>> + Send + Sync + Clone> ConsumerDataTrait for T {}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConsumerConfig {
-    pub consumer_name: String,
-    pub consumer_id: u64,
     pub topic: String,
     pub subscription: String,
 }
@@ -55,12 +49,9 @@ where
     T: ConsumerDataTrait,
 {
     pub(crate) config: ConsumerConfig,
-    pub(crate) pulsar_engine_connection: EngineConnection<Outbound, Inbound>,
-    pub(crate) resolver_manager: ResolverManager<Inbound>,
-    pub(crate) inbound_buffer: Mutex<Vec<Inbound>>,
+    pub(crate) client: Client,
     pub(crate) message_permits: u32,
-    pub(crate) current_message_permits: RwLock<u32>,
-    pub(crate) request_id: AtomicU64,
+    pub(crate) current_message_permits: AtomicU32,
     pub(crate) plugins: Mutex<Vec<Box<dyn ConsumerPlugin<T> + Send + Sync>>>,
 }
 
@@ -68,147 +59,22 @@ impl<T> Consumer<T>
 where
     T: ConsumerDataTrait,
 {
-    pub async fn resolve(
-        &self,
-        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
-        resolver: Resolver<Inbound>,
-    ) -> Result<Inbound, NeutronError> {
-        loop {
-            tokio::select! {
-                inbound = pulsar_engine_connection.recv() => {
-                    match inbound {
-                        Ok(inbound) => {
-                            if !self.resolver_manager.try_resolve(&inbound).await {
-                                self.inbound_buffer.lock().await.push(inbound);
-                            }
-                        }
-                        Err(e) => {
-                            return Err(e)
-                        }
-                    }
-                }
-                inbound = resolver.recv() => {
-                    return inbound.map_err(|_| NeutronError::OperationTimeout);
-                }
-            }
-        }
-    }
+    pub async fn next_message(&self) -> Result<Message<T>, NeutronError> {
+        self.check_and_flow().await?;
 
-    pub async fn send_and_resolve(
-        &self,
-        socket_connection: &EngineConnection<Outbound, Inbound>,
-        outbound: &ResultOutbound,
-    ) -> ResultInbound {
-        match outbound {
-            Ok(outbound) => match self.resolver_manager.put_resolver(outbound).await {
-                Some(resolver) => {
-                    socket_connection
-                        .send(Ok(outbound.clone()))
-                        .await
-                        .map_err(|_| NeutronError::ChannelTerminated)?;
-                    self.resolve(socket_connection, resolver).await
-                }
-                _ => Err(NeutronError::Unresolvable),
-            },
-            Err(e) => Err(e.clone()),
-        }
-    }
+        let crate::message::Message {
+            payload,
+            message_id,
+            ..
+        } = self.client.next_message().await?;
 
-    async fn flow(
-        &self,
-        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
-        permits: u32,
-    ) -> Result<(), NeutronError> {
-        let outbound = Outbound::Client(ClientOutbound::Flow {
-            consumer_id: self.config.consumer_id,
-            message_permits: permits,
-        });
-        let _ = pulsar_engine_connection.send(Ok(outbound)).await?;
-        Ok(())
-    }
-
-    pub async fn subscribe(
-        &self,
-        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
-    ) -> Result<(), NeutronError> {
-        let outbound = Outbound::Client(ClientOutbound::Subscribe {
-            topic: self.config.topic.clone(),
-            subscription: self.config.subscription.clone(),
-            consumer_id: self.config.consumer_id,
-            sub_type: crate::message::proto::pulsar::command_subscribe::SubType::Shared,
-            request_id: self
-                .request_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-        });
-        let _ = self
-            .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
-            .await?;
-        Ok(())
-    }
-
-    pub async fn lookup_topic(
-        &self,
-        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
-    ) -> Result<(), NeutronError> {
-        let outbound = Outbound::Client(ClientOutbound::LookupTopic {
-            topic: self.config.topic.clone(),
-            request_id: self
-                .request_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-        });
-        let _ = self
-            .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
-            .await?;
-        Ok(())
-    }
-
-    pub async fn connect(&self) -> Result<(), NeutronError> {
-        self.lookup_topic(&self.pulsar_engine_connection).await?;
-        self.subscribe(&self.pulsar_engine_connection).await?;
-        self.flow(&self.pulsar_engine_connection, self.message_permits * 2)
-            .await?;
-        Ok(())
-    }
-
-    async fn check_and_flow(&self) -> Result<(), NeutronError> {
-        {
-            let mut current_message_permits = self.current_message_permits.write().await;
-            if *current_message_permits >= self.message_permits {
-                self.flow(&self.pulsar_engine_connection, self.message_permits)
-                    .await?;
-                *current_message_permits = 0;
-            }
-        }
-        Ok(())
-    }
-
-    async fn next_inbound(&self) -> Result<Inbound, NeutronError> {
-        let mut inbound_buffer = self.inbound_buffer.lock().await;
-        if let Some(inbound) = inbound_buffer.pop() {
-            Ok(inbound)
-        } else {
-            let inbound = self.pulsar_engine_connection.recv().await?;
-            Ok(inbound)
-        }
-    }
-
-    async fn increment_message_permit_count(&self) {
-        let mut current_message_permits = self.current_message_permits.write().await;
-        *current_message_permits += 1;
-    }
-
-    async fn handle_client_inbound_message(
-        &self,
-        payload: Vec<u8>,
-        message_id: MessageIdData,
-    ) -> Result<Message<T>, NeutronError> {
-        self.increment_message_permit_count().await;
         #[cfg(feature = "json")]
         let message: Message<T> = Message {
             payload: serde_json::from_slice(&payload)
                 .map_err(|_| NeutronError::DeserializationFailed)?,
             message_id: message_id.clone(),
         };
+
         #[cfg(not(feature = "json"))]
         let message: Message<T> = Message {
             payload: payload
@@ -216,85 +82,42 @@ where
                 .map_err(|_| NeutronError::DeserializationFailed)?,
             message_id: message_id.clone(),
         };
-        self.on_message(message.clone()).await?;
+
+        // increase message permit count
+        self.current_message_permits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Ok(message)
     }
 
-    pub async fn next(&self) -> Result<Message<T>, NeutronError> {
-        loop {
-            self.check_and_flow().await?;
-            match self.next_inbound().await {
-                Ok(inbound) => {
-                    if let Inbound::Client(ClientInbound::Message {
-                        payload,
-                        message_id,
-                        ..
-                    }) = inbound
-                    {
-                        return self
-                            .handle_client_inbound_message(payload, message_id)
-                            .await;
-                    };
-                    continue;
-                }
-                Err(e) => {
-                    log::warn!("{}", e);
-                    return Err(e);
-                }
+    async fn check_and_flow(&self) -> Result<(), NeutronError> {
+        {
+            let current_message_permits = self
+                .current_message_permits
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if current_message_permits >= self.message_permits {
+                self.client.flow(self.message_permits * 2).await?;
+                self.current_message_permits
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
             }
-        }
-    }
-
-    pub async fn on_message(&self, message: Message<T>) -> Result<(), NeutronError> {
-        let mut plugins = self.plugins.lock().await;
-        for plugin in plugins.iter_mut() {
-            plugin.on_message(self, message.clone()).await?;
         }
         Ok(())
     }
 
-    pub async fn register_plugin<Plugin>(&self, plugin: Plugin)
-    where
-        Plugin: ConsumerPlugin<T> + Send + Sync + 'static,
-    {
-        let mut plugins = self.plugins.lock().await;
-        plugins.push(Box::new(plugin));
-        log::info!("Plugin registered");
-    }
-
-    pub async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
-        let outbound = Outbound::Client(ClientOutbound::Ack(vec![Ack {
-            consumer_id: self.config.consumer_id,
-            request_id: self
-                .request_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-            message_id: message_id.clone(),
-        }]));
-        let _ = self
-            .send_and_resolve(&self.pulsar_engine_connection, &Ok(outbound))
+    async fn connect(&self) -> Result<(), NeutronError> {
+        self.client.lookup_topic(&self.config.topic).await?;
+        self.client
+            .subscribe(&self.config.topic, &self.config.subscription)
             .await?;
+        self.client.flow(self.message_permits * 2).await?;
         Ok(())
     }
 
-    pub async fn consume(&self) -> Result<(), NeutronError> {
-        loop {
-            self.check_and_flow().await?;
-            let inbound = self.next_inbound().await?;
-            match inbound {
-                Inbound::Client(ClientInbound::Message {
-                    payload,
-                    message_id,
-                    ..
-                }) => {
-                    self.handle_client_inbound_message(payload.clone(), message_id.clone())
-                        .await?;
-                }
-                _ => {}
-            }
-        }
+    fn consumer_id(&self) -> u64 {
+        self.client.client_id
     }
 
-    pub fn name(&self) -> &str {
+    fn consumer_name(&self) -> &str {
         &self.config.consumer_name
     }
 }
@@ -373,32 +196,26 @@ where
         let consumer_name = self.consumer_name.unwrap();
         let topic = self.topic.unwrap();
         let subscription = self.subscription.unwrap();
-        let consumer_id = pulsar_manager.consumer_id();
+        let consumer_id = pulsar_manager.new_client_id();
 
         let consumer_config = ConsumerConfig {
-            consumer_name,
-            consumer_id,
-            topic,
+            topic: topic.clone(),
             subscription,
         };
 
-        log::info!(
-            "Created consumer, consumer_id: {}",
-            consumer_config.consumer_id
-        );
+        let pulsar_engine_connection = pulsar_manager.register(topic, consumer_id).await?;
 
-        let pulsar_engine_connection = pulsar_manager.register_consumer(&consumer_config).await?;
+        let client = Client::new(pulsar_engine_connection, consumer_id, consumer_name);
 
         let consumer = Consumer {
             config: consumer_config,
-            pulsar_engine_connection,
-            resolver_manager: ResolverManager::new(),
-            inbound_buffer: Mutex::new(Vec::new()),
             message_permits: 250,
-            current_message_permits: RwLock::new(0),
+            current_message_permits: AtomicU32::new(0),
             plugins: self.plugins.into(),
-            request_id: AtomicU64::new(0),
+            client,
         };
+
+        log::info!("Created consumer, consumer_id: {}", consumer.consumer_id());
 
         consumer.connect().await?;
         Ok(consumer)
