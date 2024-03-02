@@ -5,12 +5,14 @@ use crate::connection::PulsarConnection;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
+use crate::message::proto::pulsar::command_lookup_topic_response::LookupType;
 use crate::message::{
     ConnectionInbound, ConnectionOutbound, EngineInbound, EngineOutbound, Inbound, Outbound,
 };
 use crate::resolver_manager::ResolverManager;
 use crate::{AuthenticationPlugin, ConsumerConfig, ProducerConfig};
 use futures::lock::Mutex;
+use url::Url;
 
 #[derive(Clone)]
 pub struct PulsarConfig {
@@ -152,25 +154,55 @@ impl Pulsar {
             };
             if let Inbound::Client(crate::message::ClientInbound::LookupTopic {
                 response,
+                proxy,
                 broker_service_url,
                 broker_service_url_tls,
                 ..
             }) = &inbound
             {
                 log::debug!("Topic lookup response: {:?}", inbound);
-                let (broker_address, is_tls) = if broker_service_url != "" {
-                    (broker_service_url, false)
+                let url = if broker_service_url != "" {
+                    broker_service_url
                 } else if broker_service_url_tls != "" {
-                    (broker_service_url_tls, true)
+                    broker_service_url_tls
                 } else {
-                    panic!("No broker service url provided");
+                    return Err(NeutronError::ConnectionFailed);
                 };
-                println!("Connecting to new broker: {}", broker_address);
-                self.connect(broker_address.to_string(), is_tls).await?;
-                self.client_manager
-                    .lock()
-                    .await
-                    .update_broker_address_for_topic(&topic, &broker_address);
+                let url = Url::parse(&url).map_err(|_| NeutronError::InvalidUrl)?;
+                match (response, proxy) {
+                    (LookupType::Connect, true) => {
+                        let proxy_url = format!("{}:{}", url.host().unwrap(), url.port().unwrap());
+                        let connection = self
+                            .connect(broker_address.clone(), true, Some(proxy_url.clone()))
+                            .await;
+                        match connection {
+                            Ok(connection) => {
+                                let inbound = self
+                                    .send_and_resolve(&broker_address, &connection, outbound)
+                                    .await?;
+                                self.connection_manager
+                                    .lock()
+                                    .await
+                                    .add_connection(proxy_url.clone(), connection);
+                                self.client_manager
+                                    .lock()
+                                    .await
+                                    .update_broker_address_for_topic(topic, &proxy_url);
+                                self.client_manager
+                                    .lock()
+                                    .await
+                                    .send(&inbound, &proxy_url)
+                                    .await?;
+                                return Ok(Some(()));
+                            }
+                            Err(e) => {
+                                log::error!("Failed to connect to pulsar broker: {}", e);
+                            }
+                        }
+                    }
+                    (LookupType::Connect, false) => (),
+                    _ => (),
+                }
                 self.client_manager
                     .lock()
                     .await
@@ -201,6 +233,7 @@ impl Pulsar {
         &self,
         broker_address: BrokerAddress,
         is_tls: bool,
+        proxy_url: Option<String>,
     ) -> Result<EngineConnection<Outbound, Inbound>, NeutronError> {
         let connection_engine = PulsarConnection::connect(broker_address.clone(), is_tls)
             .await?
@@ -214,6 +247,9 @@ impl Pulsar {
         } else {
             (None, None)
         };
+        if let Some(url) = proxy_url.clone() {
+            log::debug!("Connecting to proxy: {}", url);
+        }
         let _ = self
             .send_and_resolve(
                 &broker_address,
@@ -221,6 +257,7 @@ impl Pulsar {
                 &Ok(Outbound::Engine(crate::message::EngineOutbound::Connect {
                     auth_data,
                     auth_method_name,
+                    proxy_url: proxy_url.clone(),
                 })),
             )
             .await;
@@ -358,7 +395,7 @@ impl Pulsar {
     ) {
         self.registration_manager_connection = Some(registration_manager_connection);
         let connection = self
-            .connect(self.config.broker_address(), self.config.is_tls())
+            .connect(self.config.broker_address(), self.config.is_tls(), None)
             .await;
         match connection {
             Ok(connection) => self
