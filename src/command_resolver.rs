@@ -22,7 +22,7 @@ where
 {
     pub fn new() -> Self {
         Self {
-            hash_map: std::collections::HashMap::new(),
+            hash_map: Mutex::new(std::collections::HashMap::new()),
             _phantom_data: std::marker::PhantomData,
         }
     }

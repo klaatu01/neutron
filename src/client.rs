@@ -110,7 +110,7 @@ impl Client {
             .await?;
 
         match lookup.response_type {
-            LookupResponseType::Connected => {
+            LookupResponseType::Connect => {
                 if lookup.proxy {
                     log::info!("Proxying to {}", lookup.broker_service_url);
                     self.connect_to_proxy(lookup.broker_service_url).await?;
@@ -130,6 +130,18 @@ impl Client {
         }
     }
 
+    pub(crate) async fn producer(&self, topic: &str) -> Result<(), NeutronError> {
+        self.send_command_and_resolve::<_, Success>(message::Producer {
+            producer_id: self.client_id,
+            producer_name: Some(self.client_name.clone()),
+            topic: topic.to_string(),
+            request_id: self.request_id.fetch_add(1, Ordering::SeqCst),
+        })
+        .await?
+        .await
+        .map(|_| ())
+    }
+
     pub(crate) async fn subscribe(
         &self,
         topic: &str,
@@ -147,14 +159,17 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) async fn send_message(&self, payload: Vec<u8>) -> Result<SendReceipt, NeutronError> {
+    pub(crate) async fn send_message(
+        &self,
+        payload: Vec<u8>,
+    ) -> Result<Pin<Box<dyn Future<Output = Result<SendReceipt, NeutronError>> + Send>>, NeutronError>
+    {
         self.send_command_and_resolve(message::Send {
             producer_name: self.client_name.clone(),
             producer_id: self.client_id,
             sequence_id: self.sequence_id.fetch_add(1, Ordering::SeqCst),
             payload,
         })
-        .await?
         .await
     }
 

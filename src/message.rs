@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter};
+
 use chrono::Utc;
 use protobuf::MessageField;
 
@@ -7,7 +9,7 @@ use crate::{
     NeutronError,
 };
 
-use self::proto::pulsar::{BaseCommand, MessageIdData, MessageMetadata};
+use self::proto::pulsar::{AuthData, BaseCommand, MessageIdData, MessageMetadata};
 
 pub mod proto {
     #![allow(clippy::all)]
@@ -33,8 +35,12 @@ pub struct MessageCommand {
     pub payload: Option<Payload>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum Command<Outbound, Inbound> {
+#[derive(Debug)]
+pub(crate) enum Command<Outbound, Inbound>
+where
+    Outbound: Clone,
+    Inbound: Clone,
+{
     Request(Outbound),
     RequestResponse(
         Outbound,
@@ -45,8 +51,8 @@ pub(crate) enum Command<Outbound, Inbound> {
 impl Command<Outbound, Inbound> {
     pub fn get_outbound(&self) -> Outbound {
         match self {
-            Command::Request(outbound) => outbound,
-            Command::RequestResponse(outbound, _) => outbound,
+            Command::Request(outbound) => outbound.clone(),
+            Command::RequestResponse(outbound, _) => outbound.clone(),
         }
     }
 }
@@ -62,6 +68,24 @@ pub enum Outbound {
     Subscribe(Subscribe),
     AuthChallenge(AuthChallenge),
     Flow(Flow),
+    Producer(Producer),
+}
+
+impl Display for Outbound {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Outbound::Ping => write!(f, "Ping"),
+            Outbound::Pong => write!(f, "Pong"),
+            Outbound::Connect(_) => write!(f, "Connect"),
+            Outbound::Send(_) => write!(f, "Send"),
+            Outbound::Ack(_) => write!(f, "Ack"),
+            Outbound::LookupTopic(_) => write!(f, "LookupTopic"),
+            Outbound::Subscribe(_) => write!(f, "Subscribe"),
+            Outbound::AuthChallenge(_) => write!(f, "AuthChallenge"),
+            Outbound::Flow(_) => write!(f, "Flow"),
+            Outbound::Producer(_) => write!(f, "Producer"),
+        }
+    }
 }
 
 impl ResolverKey for Outbound {
@@ -84,6 +108,7 @@ impl Into<MessageCommand> for Outbound {
             Outbound::Subscribe(subscribe) => subscribe.into(),
             Outbound::AuthChallenge(auth_challenge) => auth_challenge.into(),
             Outbound::Flow(flow) => flow.into(),
+            Outbound::Producer(producer) => producer.into(),
         }
     }
 }
@@ -99,6 +124,24 @@ pub enum Inbound {
     LookupTopicResponse(LookupTopicResponse),
     AuthChallengeRequest(AuthChallengeRequest),
     Success(Success),
+    ProducerSuccess(ProducerSuccess),
+}
+
+impl Display for Inbound {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Inbound::Ping => write!(f, "Ping"),
+            Inbound::Pong => write!(f, "Pong"),
+            Inbound::Connected(_) => write!(f, "Connected"),
+            Inbound::SendReceipt(_) => write!(f, "SendReceipt"),
+            Inbound::AckReciept(_) => write!(f, "AckReciept"),
+            Inbound::Message(_) => write!(f, "Message"),
+            Inbound::LookupTopicResponse(_) => write!(f, "LookupTopicResponse"),
+            Inbound::AuthChallengeRequest(_) => write!(f, "AuthChallengeRequest"),
+            Inbound::Success(_) => write!(f, "Success"),
+            Inbound::ProducerSuccess(_) => write!(f, "ProducerSuccess"),
+        }
+    }
 }
 
 impl Inbound {
@@ -348,10 +391,10 @@ impl Into<MessageCommand> for Send {
             metadata.set_sequence_id(self.sequence_id);
             metadata.set_publish_time(now_as_millis);
             metadata.set_event_time(now_as_millis);
-            Some(Payload {
+            Payload {
                 metadata,
                 data: self.payload,
-            })
+            }
         };
 
         MessageCommand {
@@ -423,7 +466,7 @@ impl Into<Outbound> for Vec<Ack> {
 impl Into<MessageCommand> for Vec<Ack> {
     fn into(self) -> MessageCommand {
         let mut command = proto::pulsar::CommandAck::new();
-        let first = self.acks.first().unwrap();
+        let first = self.first().unwrap();
         command.set_consumer_id(first.consumer_id);
 
         if self.len() > 1 {
@@ -543,7 +586,7 @@ impl Into<MessageCommand> for LookupTopic {
         command.set_request_id(self.request_id);
 
         let mut base = proto::pulsar::BaseCommand::new();
-        base.lookup_topic = MessageField::some(command);
+        base.lookupTopic = MessageField::some(command);
         base.set_type(proto::pulsar::base_command::Type::LOOKUP.into());
 
         MessageCommand {
@@ -557,7 +600,7 @@ impl Into<MessageCommand> for LookupTopic {
 
 #[derive(Debug, Clone)]
 pub enum LookupResponseType {
-    Connected,
+    Connect,
     Redirect,
     Failed,
 }
@@ -599,23 +642,23 @@ impl TryFrom<MessageCommand> for LookupTopicResponse {
     fn try_from(value: MessageCommand) -> Result<Self, Self::Error> {
         match value.command.type_() {
             proto::pulsar::base_command::Type::LOOKUP_RESPONSE => {
-                let response = value.command.lookup_topic_response.unwrap();
+                let response = value.command.lookupTopicResponse.unwrap();
                 let response_type = match response.response() {
-                    proto::pulsar::command_lookup_topic_response::LookupType::CONNECTED => {
-                        LookupResponseType::Connected
+                    proto::pulsar::command_lookup_topic_response::LookupType::Connect => {
+                        LookupResponseType::Connect
                     }
-                    proto::pulsar::command_lookup_topic_response::LookupType::REDIRECT => {
+                    proto::pulsar::command_lookup_topic_response::LookupType::Redirect => {
                         LookupResponseType::Redirect
                     }
-                    proto::pulsar::command_lookup_topic_response::LookupType::FAILED => {
+                    proto::pulsar::command_lookup_topic_response::LookupType::Failed => {
                         LookupResponseType::Failed
                     }
                 };
 
                 Ok(LookupTopicResponse {
                     request_id: response.request_id(),
-                    broker_service_url: response.broker_service_url(),
-                    broker_service_url_tls: response.broker_service_url_tls(),
+                    broker_service_url: response.brokerServiceUrl().to_string(),
+                    broker_service_url_tls: response.brokerServiceUrlTls().to_string(),
                     response_type,
                     authoritative: response.authoritative(),
                     proxy: response.proxy_through_service_url(),
@@ -630,7 +673,8 @@ impl TryFrom<MessageCommand> for LookupTopicResponse {
 
 #[derive(Debug, Clone)]
 pub struct AuthChallenge {
-    pub challenge: Vec<u8>,
+    pub auth_method_name: String,
+    pub auth_data: Vec<u8>,
 }
 
 impl Into<Outbound> for AuthChallenge {
@@ -641,11 +685,17 @@ impl Into<Outbound> for AuthChallenge {
 
 impl Into<MessageCommand> for AuthChallenge {
     fn into(self) -> MessageCommand {
-        let mut command = proto::pulsar::CommandAuthChallenge::new();
-        command.set_challenge(self.challenge);
+        let auth_data = AuthData {
+            auth_data: Some(self.auth_data),
+            auth_method_name: Some(self.auth_method_name),
+            ..Default::default()
+        };
+
+        let mut command = proto::pulsar::CommandAuthResponse::new();
+        command.response = MessageField::some(auth_data);
 
         let mut base = proto::pulsar::BaseCommand::new();
-        base.auth_challenge = MessageField::some(command);
+        base.authResponse = MessageField::some(command);
         base.set_type(proto::pulsar::base_command::Type::AUTH_CHALLENGE.into());
 
         MessageCommand {
@@ -700,7 +750,7 @@ impl Into<MessageCommand> for Flow {
     fn into(self) -> MessageCommand {
         let mut command = proto::pulsar::CommandFlow::new();
         command.set_consumer_id(self.consumer_id);
-        command.set_message_permits(self.message_permits);
+        command.set_messagePermits(self.message_permits);
 
         let mut base = proto::pulsar::BaseCommand::new();
         base.flow = MessageField::some(command);
@@ -743,11 +793,11 @@ impl Into<MessageCommand> for Subscribe {
         let mut command = proto::pulsar::CommandSubscribe::new();
         command.set_topic(self.topic);
         command.set_subscription(self.subscription);
-        command.set_sub_type(match self.sub_type {
+        command.set_subType(match self.sub_type {
             SubType::Exclusive => proto::pulsar::command_subscribe::SubType::Exclusive,
             SubType::Shared => proto::pulsar::command_subscribe::SubType::Shared,
             SubType::Failover => proto::pulsar::command_subscribe::SubType::Failover,
-            SubType::KeyShared => proto::pulsar::command_subscribe::SubType::KeyShared,
+            SubType::KeyShared => proto::pulsar::command_subscribe::SubType::Key_Shared,
         });
         command.set_consumer_id(self.consumer_id);
         command.set_request_id(self.request_id);
@@ -797,10 +847,81 @@ impl TryFrom<MessageCommand> for Success {
     }
 }
 
+// Producer Registration
+#[derive(Debug, Clone)]
+pub struct Producer {
+    pub(crate) topic: String,
+    pub(crate) producer_id: u64,
+    pub(crate) request_id: u64,
+    pub(crate) producer_name: Option<String>,
+}
+
+impl Into<Outbound> for Producer {
+    fn into(self) -> Outbound {
+        Outbound::Producer(self)
+    }
+}
+
+impl Into<MessageCommand> for Producer {
+    fn into(self) -> MessageCommand {
+        let mut command = proto::pulsar::CommandProducer::new();
+        command.set_producer_id(self.producer_id);
+        command.set_request_id(self.request_id);
+        command.set_topic(self.topic);
+        if let Some(name) = self.producer_name {
+            command.set_producer_name(name);
+        }
+
+        let mut base = proto::pulsar::BaseCommand::new();
+        base.producer = MessageField::some(command);
+        base.set_type(proto::pulsar::base_command::Type::PRODUCER.into());
+
+        MessageCommand {
+            command: base,
+            payload: None,
+        }
+    }
+}
+
+// Producer Success
+#[derive(Debug, Clone)]
+pub struct ProducerSuccess {
+    pub request_id: u64,
+    pub producer_name: String,
+}
+
+impl TryFrom<Inbound> for ProducerSuccess {
+    type Error = NeutronError;
+
+    fn try_from(value: Inbound) -> Result<Self, Self::Error> {
+        match value {
+            Inbound::ProducerSuccess(success) => Ok(success),
+            _ => Err(NeutronError::Unresolvable),
+        }
+    }
+}
+
+impl TryFrom<MessageCommand> for ProducerSuccess {
+    type Error = NeutronError;
+
+    fn try_from(value: MessageCommand) -> Result<Self, Self::Error> {
+        match value.command.type_() {
+            proto::pulsar::base_command::Type::PRODUCER_SUCCESS => {
+                let success = value.command.producer_success.unwrap();
+                Ok(ProducerSuccess {
+                    request_id: success.request_id(),
+                    producer_name: success.producer_name().to_string(),
+                })
+            }
+            _ => Err(NeutronError::Unresolvable),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::codec::Codec;
-    use crate::messagev2::MessageCommand;
+    use crate::message::MessageCommand;
     use bytes::BytesMut;
     use protobuf::{Enum, MessageField};
     use tokio_util::codec::{Decoder, Encoder};

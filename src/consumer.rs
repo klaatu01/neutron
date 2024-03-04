@@ -118,7 +118,7 @@ where
     }
 
     fn consumer_name(&self) -> &str {
-        &self.config.consumer_name
+        &self.client.client_name
     }
 }
 

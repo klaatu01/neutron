@@ -2,7 +2,7 @@ use crate::codec::Codec;
 use crate::connection_manager::BrokerAddress;
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
-use crate::message::{Inbound, Message, Outbound};
+use crate::message::{Inbound, MessageCommand, Outbound};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
@@ -23,7 +23,7 @@ pub struct PulsarConnection {
 }
 
 impl ConnectionStream {
-    pub async fn send(&mut self, message: Message) -> Result<(), NeutronError> {
+    pub async fn send(&mut self, message: MessageCommand) -> Result<(), NeutronError> {
         match self {
             ConnectionStream::Tcp(stream) => {
                 stream.send(message).await.map_err(|e| {
@@ -41,7 +41,7 @@ impl ConnectionStream {
         Ok(())
     }
 
-    pub async fn next(&mut self) -> Option<Result<Message, NeutronError>> {
+    pub async fn next(&mut self) -> Option<Result<MessageCommand, NeutronError>> {
         match self {
             ConnectionStream::Tcp(stream) => {
                 let message = stream.next().await;
@@ -122,8 +122,8 @@ impl PulsarConnection {
                 outbound = client_connection.recv() => {
                     match outbound {
                         Ok(outbound) => {
-                            log::debug!("{}", outbound.to_string());
-                            let msg: Message = outbound.into();
+                            log::debug!("-> {}", outbound.to_string());
+                            let msg: MessageCommand = outbound.into();
                             let _ = self
                                 .stream.send(msg).await;
                         }
@@ -141,12 +141,14 @@ impl PulsarConnection {
                             log::warn!("Connection closed");
                             Err(NeutronError::Disconnected)
                         }
-                        Some(Ok(message)) =>
-                            Inbound::try_from(&message)
+                        Some(Ok(message)) => {
+                            let _type = message.command.type_();
+                            Inbound::try_from(message)
                                 .map_err(|_| {
-                                    log::warn!("Unsupported command: {:?}", message.command.type_());
+                                    log::warn!("Unsupported command: {:?}", _type);
                                     NeutronError::UnsupportedCommand
-                                }),
+                                })
+                        },
                         Some(Err(e)) => {
                             log::warn!("Error: {}", e);
                             Err(NeutronError::DecodeFailed)
@@ -159,7 +161,7 @@ impl PulsarConnection {
 
                     match &inbound {
                         Ok(inbound) => {
-                            log::debug!("{}", inbound.to_string());
+                            log::debug!("<- {}", inbound.to_string());
                         }
                         Err(NeutronError::Disconnected) => {
                             log::warn!("Disconnected");
