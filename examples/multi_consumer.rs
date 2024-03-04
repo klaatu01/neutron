@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neutron::{ConsumerBuilder, ConsumerPlugin, NeutronError};
+use neutron::{ConsumerBuilder, ConsumerEngine, ConsumerPlugin, NeutronError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -34,7 +34,7 @@ impl ConsumerPlugin<Data> for PayloadLoggerPlugin {
         consumer: &neutron::Consumer<Data>,
         message: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
-        log::info!("{}: {}", consumer.name(), message.payload.name);
+        log::info!("{}: {}", consumer.consumer_name(), message.payload.name);
         Ok(())
     }
 }

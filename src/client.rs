@@ -8,8 +8,9 @@ use futures::Future;
 use crate::{
     engine::EngineConnection,
     message::{
-        self, Command, Connect, Connected, Inbound, LookupResponseType, LookupTopic,
-        LookupTopicResponse, Outbound, SendReceipt, Subscribe, Success,
+        self, proto::pulsar::MessageIdData, AckReciept, Command, Connect, Connected, Inbound,
+        LookupResponseType, LookupTopic, LookupTopicResponse, Outbound, SendReceipt, Subscribe,
+        Success,
     },
     NeutronError,
 };
@@ -153,6 +154,17 @@ impl Client {
             subscription: subscription.to_string(),
             request_id: self.request_id.fetch_add(1, Ordering::SeqCst),
             sub_type: message::SubType::Shared,
+        })
+        .await?
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
+        self.send_command_and_resolve::<_, AckReciept>(message::Ack {
+            consumer_id: self.client_id,
+            message_id: message_id.clone(),
+            request_id: self.request_id.fetch_add(1, Ordering::SeqCst),
         })
         .await?
         .await?;

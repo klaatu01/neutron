@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     for _ in 0..10 {
-        let response: Message<Data> = consumer.next().await?;
+        let response: Message<Data> = consumer.next_message().await?;
         log::info!("Received message: {:?}", response.payload);
         consumer.ack(&response.message_id).await?;
     }

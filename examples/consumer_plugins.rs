@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neutron::{ConsumerBuilder, ConsumerPlugin, NeutronError};
+use neutron::{ConsumerBuilder, ConsumerEngine, ConsumerPlugin, NeutronError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

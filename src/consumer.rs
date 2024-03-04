@@ -90,6 +90,11 @@ where
         Ok(message)
     }
 
+    pub async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
+        self.client.ack(message_id).await?;
+        Ok(())
+    }
+
     async fn check_and_flow(&self) -> Result<(), NeutronError> {
         {
             let current_message_permits = self
@@ -113,12 +118,33 @@ where
         Ok(())
     }
 
-    fn consumer_id(&self) -> u64 {
+    pub fn consumer_id(&self) -> u64 {
         self.client.client_id
     }
 
-    fn consumer_name(&self) -> &str {
+    pub fn consumer_name(&self) -> &str {
         &self.client.client_name
+    }
+}
+
+#[async_trait]
+pub trait ConsumerEngine {
+    async fn consume(&self) -> Result<(), NeutronError>;
+}
+
+#[async_trait]
+impl<T> ConsumerEngine for Consumer<T>
+where
+    T: ConsumerDataTrait,
+{
+    async fn consume(&self) -> Result<(), NeutronError> {
+        loop {
+            let message = self.next_message().await?;
+            let mut plugins = self.plugins.lock().await;
+            for plugin in plugins.iter_mut() {
+                plugin.on_message(self, message.clone()).await?;
+            }
+        }
     }
 }
 
