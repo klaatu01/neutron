@@ -67,7 +67,10 @@ impl Client {
                 Ok(Ok(inbound)) => {
                     Response::try_from(inbound).map_err(|_| NeutronError::Unresolvable)
                 }
-                Ok(Err(err)) => Err(err),
+                Ok(Err(err)) => {
+                    log::error!("Error resolving command: {:?}", err);
+                    Err(err)
+                }
                 Err(_) => Err(NeutronError::ChannelTerminated),
             }
         }))

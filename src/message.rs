@@ -91,6 +91,14 @@ impl Display for Outbound {
 impl ResolverKey for Outbound {
     fn try_key(&self) -> Option<String> {
         match self {
+            Outbound::Connect(_) => Some("CONNECT".to_string()),
+            Outbound::Send(_) => Some("SEND".to_string()),
+            Outbound::Ack(_) => Some("ACK".to_string()),
+            Outbound::LookupTopic(_) => Some("LOOKUP".to_string()),
+            Outbound::Subscribe(_) => Some("SUBSCRIBE".to_string()),
+            Outbound::AuthChallenge(_) => Some("AUTH_CHALLENGE".to_string()),
+            Outbound::Flow(_) => Some("FLOW".to_string()),
+            Outbound::Producer(_) => Some("PRODUCER".to_string()),
             _ => None,
         }
     }
@@ -158,6 +166,14 @@ impl Inbound {
 impl ResolverKey for Inbound {
     fn try_key(&self) -> Option<String> {
         match self {
+            Inbound::Connected(_) => Some("CONNECT".to_string()),
+            Inbound::SendReceipt(_) => Some("SEND".to_string()),
+            Inbound::AckReciept(_) => Some("ACK".to_string()),
+            Inbound::Message(_) => Some("MESSAGE".to_string()),
+            Inbound::LookupTopicResponse(_) => Some("LOOKUP".to_string()),
+            Inbound::AuthChallengeRequest(_) => Some("AUTH_CHALLENGE".to_string()),
+            Inbound::Success(_) => Some("SUBSCRIBE".to_string()),
+            Inbound::ProducerSuccess(_) => Some("PRODUCER".to_string()),
             _ => None,
         }
     }
@@ -190,6 +206,9 @@ impl TryFrom<MessageCommand> for Inbound {
             }
             proto::pulsar::base_command::Type::SUCCESS => {
                 Success::try_from(value).map(Inbound::Success)
+            }
+            proto::pulsar::base_command::Type::PRODUCER_SUCCESS => {
+                ProducerSuccess::try_from(value).map(Inbound::ProducerSuccess)
             }
             _ => Err(NeutronError::UnsupportedCommand),
         }
@@ -640,6 +659,7 @@ impl TryFrom<MessageCommand> for LookupTopicResponse {
     type Error = NeutronError;
 
     fn try_from(value: MessageCommand) -> Result<Self, Self::Error> {
+        log::debug!("LookupTopicResponse: {:?}", value);
         match value.command.type_() {
             proto::pulsar::base_command::Type::LOOKUP_RESPONSE => {
                 let response = value.command.lookupTopicResponse.unwrap();

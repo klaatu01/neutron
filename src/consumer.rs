@@ -110,11 +110,21 @@ where
     }
 
     async fn connect(&self) -> Result<(), NeutronError> {
+        log::info!("Connecting consumer: {}", self.client.client_name);
+        self.client.connect().await?;
+        log::info!("Looking up topic: {}", self.config.topic);
         self.client.lookup_topic(&self.config.topic).await?;
+        log::info!(
+            "Subscribing to topic: {} with subscription: {}",
+            self.config.topic,
+            self.config.subscription
+        );
         self.client
             .subscribe(&self.config.topic, &self.config.subscription)
             .await?;
+        log::info!("Flowing consumer: {}", self.client.client_name);
         self.client.flow(self.message_permits * 2).await?;
+        log::info!("Connected consumer: {}", self.client.client_name);
         Ok(())
     }
 

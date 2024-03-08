@@ -5,7 +5,7 @@ use crate::connection::PulsarConnection;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
-use crate::message::Command;
+use crate::message::{self, Command, Connect};
 use crate::message::{Inbound, Outbound};
 use crate::AuthenticationPlugin;
 use futures::lock::Mutex;
@@ -112,8 +112,23 @@ impl Pulsar {
     ) -> Result<(), NeutronError> {
         match outbound {
             Ok(outbound) => {
-                self.send_to_connection(broker_address, outbound.clone())
-                    .await
+                let outbound = match outbound {
+                    Outbound::Connect(connect) => {
+                        if let Some(auth_plugin) = &self.auth_plugin {
+                            let auth_data = auth_plugin.auth_data().await?;
+                            let auth_method_name = auth_plugin.auth_method_name();
+                            Outbound::Connect(Connect {
+                                auth_data: Some(auth_data),
+                                auth_method_name: Some(auth_method_name),
+                                ..connect.clone()
+                            })
+                        } else {
+                            outbound.clone()
+                        }
+                    }
+                    _ => outbound.clone(),
+                };
+                self.send_to_connection(broker_address, outbound).await
             }
             Err(e) => {
                 log::error!("Error in outbound: {}", e);
@@ -129,8 +144,19 @@ impl Pulsar {
     ) -> Result<(), NeutronError> {
         match inbound {
             Ok(inbound) => {
+                let inbound = match inbound {
+                    Inbound::LookupTopicResponse(connected) => {
+                        Inbound::LookupTopicResponse(message::LookupTopicResponse {
+                            proxy: connected.proxy
+                                && connected.broker_service_url != broker_address.to_string(),
+                            ..connected.clone()
+                        })
+                    }
+                    _ => inbound.clone(),
+                };
+
                 let client_lock = self.client_manager.lock().await;
-                client_lock.send(inbound, broker_address).await?;
+                client_lock.send(&inbound, broker_address).await?;
                 Ok(())
             }
             Err(e) => {
@@ -174,11 +200,12 @@ impl Pulsar {
             Next::Registration(registration) => {
                 if let Some(registration_manager_connection) = &self.registration_manager_connection
                 {
-                    self.handle_registration(
-                        registration_manager_connection,
-                        registration.unwrap(),
-                    )
-                    .await;
+                    if let Ok(registration) = registration {
+                        self.handle_registration(registration_manager_connection, registration)
+                            .await;
+                    } else {
+                        log::error!("Error in registration: {:?}", registration.err().unwrap());
+                    }
                 }
                 Ok(())
             }
@@ -228,6 +255,7 @@ impl Pulsar {
         loop {
             if let Err(e) = self.next().await {
                 log::error!("Error in pulsar: {}", e);
+                break;
             }
         }
     }
