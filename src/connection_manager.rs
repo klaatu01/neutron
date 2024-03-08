@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 
-use futures::FutureExt;
+use futures::future::FutureExt;
 
 use crate::{
+    broker_address::BrokerAddress,
     engine::EngineConnection,
-    message::{Inbound, Outbound},
+    message::{Command, Inbound, Outbound},
     NeutronError,
 };
 
-pub type BrokerAddress = String;
-
 pub struct ConnectionManager {
-    connections: HashMap<BrokerAddress, EngineConnection<Outbound, Inbound>>,
+    connections: HashMap<BrokerAddress, EngineConnection<Command<Outbound, Inbound>, Inbound>>,
 }
 
 impl ConnectionManager {
@@ -27,12 +26,12 @@ impl ConnectionManager {
 
     pub async fn send(
         &mut self,
-        message: Result<Outbound, NeutronError>,
-        broker_address: BrokerAddress,
+        message: Result<Command<Outbound, Inbound>, NeutronError>,
+        broker_address: &BrokerAddress,
     ) -> Result<(), NeutronError> {
         let connection = self
             .connections
-            .get(broker_address.as_str())
+            .get(broker_address)
             .ok_or(NeutronError::Disconnected)?;
 
         connection.send(message).await
@@ -55,19 +54,22 @@ impl ConnectionManager {
     pub fn add_connection(
         &mut self,
         broker_address: BrokerAddress,
-        connection: EngineConnection<Outbound, Inbound>,
+        connection: EngineConnection<Command<Outbound, Inbound>, Inbound>,
     ) {
         self.connections.insert(broker_address, connection);
     }
 
     pub fn get_connection(
         &self,
-        broker_address: &str,
-    ) -> Option<&EngineConnection<Outbound, Inbound>> {
+        broker_address: &BrokerAddress,
+    ) -> Option<&EngineConnection<Command<Outbound, Inbound>, Inbound>> {
         self.connections.get(broker_address)
     }
 
-    pub fn remove_connection(&mut self, broker_address: &str) {
-        self.connections.remove(broker_address);
+    pub fn remove_connection(
+        &mut self,
+        broker_address: &BrokerAddress,
+    ) -> Option<EngineConnection<Command<Outbound, Inbound>, Inbound>> {
+        self.connections.remove(broker_address)
     }
 }

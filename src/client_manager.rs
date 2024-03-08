@@ -1,8 +1,9 @@
+use bimap::BiHashMap;
 use futures::FutureExt;
 
 use crate::{
+    broker_address::BrokerAddress,
     command_resolver::CommandResolver,
-    connection_manager::BrokerAddress,
     engine::EngineConnection,
     message::{Command, Inbound, Outbound},
     NeutronError,
@@ -12,7 +13,7 @@ pub struct ClientData {
     pub id: u64,
     pub connection: EngineConnection<Inbound, Command<Outbound, Inbound>>,
     pub topic: String,
-    pub broker_address: String,
+    pub broker_address: BrokerAddress,
 }
 
 impl ClientData {
@@ -20,7 +21,7 @@ impl ClientData {
         &self.connection
     }
 
-    fn broker_address(&self) -> &str {
+    fn broker_address(&self) -> &BrokerAddress {
         &self.broker_address
     }
 }
@@ -28,6 +29,7 @@ impl ClientData {
 pub struct ClientManager {
     clients: Vec<ClientData>,
     pub(crate) command_resolver: CommandResolver<Outbound, Inbound>,
+    pub(crate) request_id_map: BiHashMap<(u64, u64), u64>,
 }
 
 impl ClientManager {
@@ -35,6 +37,7 @@ impl ClientManager {
         ClientManager {
             clients: Vec::new(),
             command_resolver: CommandResolver::new(),
+            request_id_map: BiHashMap::new(),
         }
     }
 
@@ -50,7 +53,7 @@ impl ClientManager {
         let (next, _, _) = futures::future::select_all(self.clients.iter().map(|client| {
             async {
                 let connection = client.get_connection();
-                let broker_address = client.broker_address().to_string();
+                let broker_address = client.broker_address();
                 let message = connection.recv().await;
                 (broker_address, message)
             }
@@ -69,7 +72,7 @@ impl ClientManager {
             Err(err) => Err(err),
         };
 
-        (next.0, outbound)
+        (next.0.clone(), outbound)
     }
 
     pub async fn send(
@@ -118,12 +121,22 @@ impl ClientManager {
         Ok(())
     }
 
-    pub fn update_broker_address_for_topic(&mut self, topic: &str, broker_address: &str) {
+    pub fn update_broker_address_for_topic(&mut self, topic: &str, broker_address: &BrokerAddress) {
         for mut client in self.clients.iter_mut() {
             if client.topic == topic {
                 println!("Updating broker address for topic: {}", topic);
-                client.broker_address = broker_address.to_string();
+                client.broker_address = broker_address.clone();
             }
         }
+    }
+
+    pub fn move_clients_to_new_broker(&mut self, from: &BrokerAddress, to: &BrokerAddress) {
+        let mut clients = Vec::new();
+        for mut client in self.clients.iter_mut() {
+            if client.broker_address == *from {
+                client.broker_address = to.clone();
+            }
+        }
+        self.clients = clients;
     }
 }

@@ -1,4 +1,5 @@
 mod auth;
+mod broker_address;
 mod client;
 mod client_manager;
 mod codec;

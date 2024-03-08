@@ -41,8 +41,8 @@ where
         if let Some(key) = inbound.try_key() {
             if let Some(tx) = self.hash_map.lock().await.remove(&key) {
                 let _ = tx.send(Ok(inbound));
+                return true;
             }
-            return true;
         }
         false
     }

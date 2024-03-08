@@ -6,6 +6,7 @@ use std::{
 use futures::Future;
 
 use crate::{
+    broker_address::BrokerAddress,
     engine::EngineConnection,
     message::{
         self, proto::pulsar::MessageIdData, AckReciept, Command, Connect, Connected, Inbound,
@@ -82,7 +83,7 @@ impl Client {
 
     pub(crate) async fn connect(&self) -> Result<Connected, NeutronError> {
         self.send_command_and_resolve(Connect {
-            proxy_url: None,
+            broker_address: None,
             auth_data: None,
             auth_method_name: None,
         })
@@ -90,12 +91,12 @@ impl Client {
         .await
     }
 
-    pub(crate) async fn connect_to_proxy(
-        &self,
-        proxy_url: String,
-    ) -> Result<Connected, NeutronError> {
+    pub(crate) async fn connect_to_proxy(&self, proxy: String) -> Result<Connected, NeutronError> {
         self.send_command_and_resolve(Connect {
-            proxy_url: Some(proxy_url),
+            broker_address: Some(BrokerAddress::Proxy {
+                url: "".to_string(),
+                proxy,
+            }),
             auth_data: None,
             auth_method_name: None,
         })

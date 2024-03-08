@@ -4,6 +4,7 @@ use chrono::Utc;
 use protobuf::MessageField;
 
 use crate::{
+    broker_address::BrokerAddress,
     codec::Payload,
     command_resolver::{CommandResolver, ResolverKey},
     NeutronError,
@@ -313,7 +314,7 @@ impl TryFrom<MessageCommand> for Pong {
 pub struct Connect {
     pub auth_data: Option<Vec<u8>>,
     pub auth_method_name: Option<String>,
-    pub proxy_url: Option<String>,
+    pub broker_address: Option<BrokerAddress>,
 }
 
 impl Into<Outbound> for Connect {
@@ -333,8 +334,8 @@ impl Into<MessageCommand> for Connect {
             connect.set_auth_data(v.to_vec())
         }
 
-        if let Some(url) = self.proxy_url {
-            connect.set_proxy_to_broker_url(url);
+        if let Some(BrokerAddress::Proxy { proxy, .. }) = self.broker_address {
+            connect.set_proxy_to_broker_url(proxy);
         }
 
         let mut base = proto::pulsar::BaseCommand::new();

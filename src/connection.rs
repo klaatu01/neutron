@@ -1,8 +1,9 @@
+use crate::broker_address::BrokerAddress;
 use crate::codec::Codec;
-use crate::connection_manager::BrokerAddress;
+use crate::command_resolver::CommandResolver;
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
-use crate::message::{Inbound, MessageCommand, Outbound};
+use crate::message::{Command, Inbound, MessageCommand, Outbound};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub enum ConnectionStream {
 
 pub struct PulsarConnection {
     stream: ConnectionStream,
+    command_resolver: CommandResolver<Outbound, Inbound>,
 }
 
 impl ConnectionStream {
@@ -70,8 +72,9 @@ impl ConnectionStream {
 }
 
 impl PulsarConnection {
-    pub async fn connect(broker_address: BrokerAddress, tls: bool) -> Result<Self, NeutronError> {
-        let broker_url = Url::parse(&broker_address).map_err(|_| NeutronError::InvalidUrl)?;
+    pub async fn connect(broker_address: BrokerAddress) -> Result<Self, NeutronError> {
+        let broker_url =
+            Url::parse(&broker_address.base_url()).map_err(|_| NeutronError::InvalidUrl)?;
         log::info!("Connecting to {}", broker_url);
 
         let host = broker_url
@@ -88,7 +91,7 @@ impl PulsarConnection {
                 NeutronError::ConnectionFailed
             })?;
 
-        let stream = if tls {
+        let stream = if broker_address.is_tls() {
             log::info!("TLS enabled");
             let mut root_cert_store = RootCertStore::empty();
             root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -110,18 +113,28 @@ impl PulsarConnection {
             ConnectionStream::Tcp(tokio_util::codec::Framed::new(stream, Codec))
         };
 
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            command_resolver: CommandResolver::new(),
+        })
     }
 
     pub async fn start_connection(
         &mut self,
-        client_connection: EngineConnection<Inbound, Outbound>,
+        client_connection: EngineConnection<Inbound, Command<Outbound, Inbound>>,
     ) {
         loop {
             tokio::select! {
                 outbound = client_connection.recv() => {
                     match outbound {
-                        Ok(outbound) => {
+                        Ok(command) => {
+                            let outbound = command.get_outbound();
+                            match command {
+                                Command::RequestResponse(outbound, sender) => {
+                                    self.command_resolver.put(outbound, sender).await;
+                                },
+                                _ => ()
+                            }
                             log::debug!("-> {}", outbound.to_string());
                             let msg: MessageCommand = outbound.into();
                             let _ = self
@@ -155,10 +168,6 @@ impl PulsarConnection {
                         }
                     };
 
-                    if let Err(_) = client_connection.send(inbound.clone()).await {
-                        break;
-                    }
-
                     match &inbound {
                         Ok(inbound) => {
                             log::debug!("<- {}", inbound.to_string());
@@ -171,6 +180,16 @@ impl PulsarConnection {
                             log::warn!("Error: {}", e);
                         }
                     }
+
+                    if let Ok(inbound) = &inbound {
+                        if self.command_resolver.try_resolve(inbound.clone()).await {
+                            continue
+                        }
+                        if let Err(_) = client_connection.send(Ok(inbound.clone())).await {
+                            break;
+                        }
+                    }
+
                 }
             }
         }
@@ -178,8 +197,8 @@ impl PulsarConnection {
 }
 
 #[async_trait]
-impl Engine<Inbound, Outbound> for PulsarConnection {
-    async fn run(mut self) -> EngineConnection<Outbound, Inbound> {
+impl Engine<Inbound, Command<Outbound, Inbound>> for PulsarConnection {
+    async fn run(mut self) -> EngineConnection<Command<Outbound, Inbound>, Inbound> {
         let (client_connection, connection) = EngineConnection::pair();
         tokio::task::spawn(async move {
             self.start_connection(client_connection).await;

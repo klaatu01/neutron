@@ -1,11 +1,12 @@
 use std::sync::atomic::AtomicU64;
 
+use crate::broker_address::BrokerAddress;
 use crate::client_manager::{ClientData, ClientManager};
 use crate::connection::PulsarConnection;
-use crate::connection_manager::{BrokerAddress, ConnectionManager};
+use crate::connection_manager::ConnectionManager;
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
-use crate::message::{self, Command, Connect};
+use crate::message::{self, Command, Connect, Connected};
 use crate::message::{Inbound, Outbound};
 use crate::AuthenticationPlugin;
 use futures::lock::Mutex;
@@ -18,7 +19,9 @@ pub struct PulsarConfig {
 
 impl PulsarConfig {
     pub fn broker_address(&self) -> BrokerAddress {
-        format!("{}:{}", self.endpoint_url, self.endpoint_port)
+        BrokerAddress::Direct {
+            url: format!("{}:{}", self.endpoint_url, self.endpoint_port),
+        }
     }
 
     pub fn is_tls(&self) -> bool {
@@ -101,7 +104,25 @@ impl Pulsar {
             .get_connection(broker_address)
             .ok_or(NeutronError::Disconnected)?;
 
-        connection.send(Ok(outbound)).await?;
+        match outbound {
+            Outbound::Connect(connect) => {
+                let (tx, rx) = futures::channel::oneshot::channel();
+                connection
+                    .send(Ok(Command::RequestResponse(Outbound::Connect(connect), tx)))
+                    .await?;
+
+                let response = rx.await.map_err(|_| NeutronError::ChannelTerminated)??;
+                self.client_manager
+                    .lock()
+                    .await
+                    .send(&response, broker_address)
+                    .await?;
+            }
+            outbound => {
+                connection.send(Ok(Command::Request(outbound))).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -114,17 +135,37 @@ impl Pulsar {
             Ok(outbound) => {
                 let outbound = match outbound {
                     Outbound::Connect(connect) => {
+                        let mut connect = connect.clone();
+
+                        match connect.broker_address {
+                            Some(BrokerAddress::Proxy { proxy, url }) => {
+                                let proxy = proxy.clone();
+
+                                let url = if url != "" {
+                                    url.to_string()
+                                } else {
+                                    self.config.broker_address().base_url().to_string()
+                                };
+
+                                connect.broker_address = Some(BrokerAddress::Proxy { url, proxy });
+                            }
+                            None => {
+                                connect.broker_address = Some(self.config.broker_address());
+                            }
+                            _ => (),
+                        }
+
                         if let Some(auth_plugin) = &self.auth_plugin {
                             let auth_data = auth_plugin.auth_data().await?;
                             let auth_method_name = auth_plugin.auth_method_name();
-                            Outbound::Connect(Connect {
-                                auth_data: Some(auth_data),
-                                auth_method_name: Some(auth_method_name),
-                                ..connect.clone()
-                            })
-                        } else {
-                            outbound.clone()
+                            connect.auth_method_name = Some(auth_method_name);
+                            connect.auth_data = Some(auth_data);
                         }
+
+                        self.new_connection(connect.broker_address.as_ref().unwrap())
+                            .await?;
+
+                        Outbound::Connect(connect)
                     }
                     _ => outbound.clone(),
                 };
@@ -151,6 +192,15 @@ impl Pulsar {
                                 && connected.broker_service_url != broker_address.to_string(),
                             ..connected.clone()
                         })
+                    }
+                    Inbound::Ping => {
+                        log::info!("Received ping from {}", broker_address);
+                        self.connection_manager
+                            .lock()
+                            .await
+                            .send(Ok(Command::Request(Outbound::Pong)), broker_address)
+                            .await?;
+                        return Ok(());
                     }
                     _ => inbound.clone(),
                 };
@@ -212,19 +262,18 @@ impl Pulsar {
         }
     }
 
-    async fn new_connection(
-        &self,
-        broker_address: &BrokerAddress,
-        is_tls: bool,
-    ) -> Result<(), NeutronError> {
-        let connection = PulsarConnection::connect(broker_address.clone(), is_tls)
+    async fn new_connection(&self, broker_address: &BrokerAddress) -> Result<(), NeutronError> {
+        let mut connection_manager = self.connection_manager.lock().await;
+        if connection_manager.get_connection(broker_address).is_some() {
+            return Ok(());
+        }
+
+        let connection = PulsarConnection::connect(broker_address.clone())
             .await?
             .run()
             .await;
-        self.connection_manager
-            .lock()
-            .await
-            .add_connection(broker_address.clone(), connection);
+
+        connection_manager.add_connection(broker_address.clone(), connection);
         Ok(())
     }
 
@@ -240,10 +289,7 @@ impl Pulsar {
     ) {
         self.registration_manager_connection = Some(registration_manager_connection);
         let broker_address = self.config.broker_address();
-        match self
-            .new_connection(&broker_address, self.config.is_tls())
-            .await
-        {
+        match self.new_connection(&broker_address).await {
             Ok(_) => {
                 log::info!("Connected to pulsar {}", broker_address);
             }
