@@ -28,6 +28,7 @@ webpki-roots = "0.26.1"
 base64 = "0.21.7"
 reqwest = { version = "0.11.24", features = ["rustls", "json"] }
 bimap = "0.6.3"
+itertools = "0.12.1"
 
 [build-dependencies]
 protobuf-codegen = "3.3.0"

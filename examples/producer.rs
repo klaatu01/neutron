@@ -43,12 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut batch = Vec::new();
-    for _ in 0..10000 {
+    for _ in 0..1000000 {
         let data = Data {
             name: Utc::now().to_rfc3339(),
         };
         batch.push(data);
-        if batch.len() == 100 {
+        if batch.len() == 1000 {
+            log::info!("Sending batch of 1000 messages");
             if let Err(e) = producer.send_all(batch.clone()).await {
                 log::error!("Error sending message: {}", e);
                 break;

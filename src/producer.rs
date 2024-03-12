@@ -1,8 +1,10 @@
 use crate::{
     client::{Client, PulsarClient},
-    message::{Inbound, Outbound},
+    message::{Inbound, Outbound, SendReceipt},
     PulsarManager,
 };
+use futures::future::join_all;
+use itertools::{Either, Itertools};
 #[cfg(feature = "json")]
 use serde::ser::Serialize;
 use serde::Deserialize;
@@ -80,10 +82,13 @@ where
             })
             .collect::<Vec<_>>();
 
-        futures::future::join_all(responses)
+        let (receipts, errors): (Vec<_>, Vec<NeutronError>) = futures::future::join_all(responses)
             .await
             .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+            .partition_result();
+
+        futures::future::join_all(receipts).await;
+
         Ok(())
     }
 }

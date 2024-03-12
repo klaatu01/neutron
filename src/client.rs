@@ -40,7 +40,10 @@ pub trait PulsarClient {
 
     async fn subscribe(&self, topic: &str, subscription: &str) -> Result<(), NeutronError>;
 
-    async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError>;
+    async fn ack(
+        &self,
+        message_id: &MessageIdData,
+    ) -> Result<Pin<Box<dyn Future<Output = Result<AckReciept, NeutronError>> + Send>>, NeutronError>;
 
     async fn send_message(
         &self,
@@ -198,15 +201,17 @@ impl PulsarClient for Client {
         Ok(())
     }
 
-    async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
+    async fn ack(
+        &self,
+        message_id: &MessageIdData,
+    ) -> Result<Pin<Box<dyn Future<Output = Result<AckReciept, NeutronError>> + Send>>, NeutronError>
+    {
         self.send_command_and_resolve::<_, AckReciept>(message::Ack {
             consumer_id: self.client_id,
             message_id: message_id.clone(),
             request_id: self.request_id.fetch_add(1, Ordering::SeqCst),
         })
-        .await?
-        .await?;
-        Ok(())
+        .await
     }
 
     async fn send_message(

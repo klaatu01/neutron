@@ -6,6 +6,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::lock::Mutex;
+use itertools::{Either, Itertools};
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -93,7 +94,23 @@ where
     }
 
     pub async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
-        self.client.ack(message_id).await?;
+        self.client.ack(message_id).await?.await?;
+        Ok(())
+    }
+
+    pub async fn ack_all(&self, message_ids: Vec<MessageIdData>) -> Result<(), NeutronError> {
+        let responses = message_ids
+            .iter()
+            .map(|m| self.client.ack(m))
+            .collect::<Vec<_>>();
+
+        let (receipts, errors): (Vec<_>, Vec<NeutronError>) = futures::future::join_all(responses)
+            .await
+            .into_iter()
+            .partition_result();
+
+        futures::future::join_all(receipts).await;
+
         Ok(())
     }
 
