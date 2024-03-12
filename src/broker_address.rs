@@ -29,7 +29,7 @@ impl BrokerAddress {
     }
 
     pub fn is_tls(&self) -> bool {
-        self.base_url().starts_with("pulse+ssl://")
+        self.base_url().starts_with("pulsar+ssl://")
     }
 }
 

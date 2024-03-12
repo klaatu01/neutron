@@ -3,6 +3,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use async_trait::async_trait;
 use futures::Future;
 
 use crate::{
@@ -10,18 +11,49 @@ use crate::{
     engine::EngineConnection,
     message::{
         self, proto::pulsar::MessageIdData, AckReciept, Command, Connect, Connected, Inbound,
-        LookupResponseType, LookupTopic, LookupTopicResponse, Outbound, SendReceipt, Subscribe,
-        Success,
+        LookupResponseType, LookupTopic, LookupTopicResponse, Outbound, ProducerSuccess,
+        SendReceipt, Subscribe, Success,
     },
     NeutronError,
 };
 
-pub(crate) struct Client {
+pub struct Client {
     pub(crate) pulsar_engine_connection: EngineConnection<Command<Outbound, Inbound>, Inbound>,
     pub(crate) client_id: u64,
     pub(crate) client_name: String,
     pub(crate) request_id: AtomicU64,
-    sequence_id: AtomicU64,
+    pub(crate) sequence_id: AtomicU64,
+}
+
+#[cfg_attr(test, mockall::automock)]
+#[async_trait]
+pub trait PulsarClient {
+    async fn next(&self) -> Result<Inbound, NeutronError>;
+
+    async fn connect(&self) -> Result<Connected, NeutronError>;
+
+    async fn connect_to_proxy(&self, proxy: String) -> Result<Connected, NeutronError>;
+
+    async fn lookup_topic(&self, topic: &str) -> Result<(), NeutronError>;
+
+    async fn producer(&self, topic: &str) -> Result<(), NeutronError>;
+
+    async fn subscribe(&self, topic: &str, subscription: &str) -> Result<(), NeutronError>;
+
+    async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError>;
+
+    async fn send_message(
+        &self,
+        payload: Vec<u8>,
+    ) -> Result<Pin<Box<dyn Future<Output = Result<SendReceipt, NeutronError>> + Send>>, NeutronError>;
+
+    async fn next_message(&self) -> Result<message::Message, NeutronError>;
+
+    async fn flow(&self, message_permits: u32) -> Result<(), NeutronError>;
+
+    fn client_id(&self) -> u64;
+
+    fn client_name(&self) -> &str;
 }
 
 impl Client {
@@ -65,9 +97,12 @@ impl Client {
         Ok(Box::pin(async move {
             let inbound: Result<Result<Inbound, NeutronError>, _> = rx.await;
             match inbound {
-                Ok(Ok(inbound)) => {
-                    Response::try_from(inbound).map_err(|_| NeutronError::Unresolvable)
-                }
+                Ok(Ok(inbound)) => Response::try_from(inbound)
+                    .map_err(|_| NeutronError::Unresolvable)
+                    .map_err(|err| {
+                        log::error!("Error resolving command: {:?}", err);
+                        err
+                    }),
                 Ok(Err(err)) => {
                     log::error!("Error resolving command: {:?}", err);
                     Err(err)
@@ -76,12 +111,15 @@ impl Client {
             }
         }))
     }
+}
 
-    pub(crate) async fn next(&self) -> Result<Inbound, NeutronError> {
+#[async_trait]
+impl PulsarClient for Client {
+    async fn next(&self) -> Result<Inbound, NeutronError> {
         self.pulsar_engine_connection.recv().await
     }
 
-    pub(crate) async fn connect(&self) -> Result<Connected, NeutronError> {
+    async fn connect(&self) -> Result<Connected, NeutronError> {
         self.send_command_and_resolve(Connect {
             broker_address: None,
             auth_data: None,
@@ -91,7 +129,7 @@ impl Client {
         .await
     }
 
-    pub(crate) async fn connect_to_proxy(&self, proxy: String) -> Result<Connected, NeutronError> {
+    async fn connect_to_proxy(&self, proxy: String) -> Result<Connected, NeutronError> {
         self.send_command_and_resolve(Connect {
             broker_address: Some(BrokerAddress::Proxy {
                 url: "".to_string(),
@@ -104,7 +142,7 @@ impl Client {
         .await
     }
 
-    pub(crate) async fn lookup_topic(&self, topic: &str) -> Result<(), NeutronError> {
+    async fn lookup_topic(&self, topic: &str) -> Result<(), NeutronError> {
         log::info!("Looking up topic {}", topic);
         let lookup: LookupTopicResponse = self
             .send_command_and_resolve::<_, LookupTopicResponse>(LookupTopic {
@@ -135,8 +173,8 @@ impl Client {
         }
     }
 
-    pub(crate) async fn producer(&self, topic: &str) -> Result<(), NeutronError> {
-        self.send_command_and_resolve::<_, Success>(message::Producer {
+    async fn producer(&self, topic: &str) -> Result<(), NeutronError> {
+        self.send_command_and_resolve::<_, ProducerSuccess>(message::Producer {
             producer_id: self.client_id,
             producer_name: Some(self.client_name.clone()),
             topic: topic.to_string(),
@@ -147,11 +185,7 @@ impl Client {
         .map(|_| ())
     }
 
-    pub(crate) async fn subscribe(
-        &self,
-        topic: &str,
-        subscription: &str,
-    ) -> Result<(), NeutronError> {
+    async fn subscribe(&self, topic: &str, subscription: &str) -> Result<(), NeutronError> {
         self.send_command_and_resolve::<_, Success>(Subscribe {
             topic: topic.to_string(),
             consumer_id: self.client_id,
@@ -164,7 +198,7 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
+    async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
         self.send_command_and_resolve::<_, AckReciept>(message::Ack {
             consumer_id: self.client_id,
             message_id: message_id.clone(),
@@ -175,12 +209,12 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) async fn send_message(
+    async fn send_message(
         &self,
         payload: Vec<u8>,
     ) -> Result<Pin<Box<dyn Future<Output = Result<SendReceipt, NeutronError>> + Send>>, NeutronError>
     {
-        self.send_command_and_resolve(message::Send {
+        self.send_command_and_resolve::<_, SendReceipt>(message::Send {
             producer_name: self.client_name.clone(),
             producer_id: self.client_id,
             sequence_id: self.sequence_id.fetch_add(1, Ordering::SeqCst),
@@ -189,7 +223,7 @@ impl Client {
         .await
     }
 
-    pub(crate) async fn next_message(&self) -> Result<message::Message, NeutronError> {
+    async fn next_message(&self) -> Result<message::Message, NeutronError> {
         loop {
             let inbound = self.next().await?;
             match message::Message::try_from(inbound) {
@@ -199,11 +233,19 @@ impl Client {
         }
     }
 
-    pub(crate) async fn flow(&self, message_permits: u32) -> Result<(), NeutronError> {
+    async fn flow(&self, message_permits: u32) -> Result<(), NeutronError> {
         self.send_command(message::Flow {
             message_permits,
             consumer_id: self.client_id,
         })
         .await
+    }
+
+    fn client_id(&self) -> u64 {
+        self.client_id
+    }
+
+    fn client_name(&self) -> &str {
+        &self.client_name
     }
 }

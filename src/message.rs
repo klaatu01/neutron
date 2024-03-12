@@ -93,7 +93,7 @@ impl ResolverKey for Outbound {
     fn try_key(&self) -> Option<String> {
         match self {
             Outbound::Connect(_) => Some("CONNECT".to_string()),
-            Outbound::Send(_) => Some("SEND".to_string()),
+            Outbound::Send(Send { sequence_id, .. }) => Some(format!("SEND:{}", sequence_id)),
             Outbound::Ack(_) => Some("ACK".to_string()),
             Outbound::LookupTopic(_) => Some("LOOKUP".to_string()),
             Outbound::Subscribe(_) => Some("SUBSCRIBE".to_string()),
@@ -168,7 +168,9 @@ impl ResolverKey for Inbound {
     fn try_key(&self) -> Option<String> {
         match self {
             Inbound::Connected(_) => Some("CONNECT".to_string()),
-            Inbound::SendReceipt(_) => Some("SEND".to_string()),
+            Inbound::SendReceipt(SendReceipt { sequence_id, .. }) => {
+                Some(format!("SEND:{}", sequence_id))
+            }
             Inbound::AckReciept(_) => Some("ACK".to_string()),
             Inbound::Message(_) => Some("MESSAGE".to_string()),
             Inbound::LookupTopicResponse(_) => Some("LOOKUP".to_string()),
@@ -193,7 +195,7 @@ impl TryFrom<MessageCommand> for Inbound {
             proto::pulsar::base_command::Type::SEND_RECEIPT => {
                 SendReceipt::try_from(value).map(Inbound::SendReceipt)
             }
-            proto::pulsar::base_command::Type::ACK => {
+            proto::pulsar::base_command::Type::ACK_RESPONSE => {
                 AckReciept::try_from(value).map(Inbound::AckReciept)
             }
             proto::pulsar::base_command::Type::MESSAGE => {
@@ -450,7 +452,7 @@ impl TryFrom<MessageCommand> for SendReceipt {
     fn try_from(value: MessageCommand) -> Result<Self, Self::Error> {
         match value.command.type_() {
             proto::pulsar::base_command::Type::SEND_RECEIPT => {
-                let send = value.command.send.unwrap();
+                let send = value.command.send_receipt.unwrap();
                 Ok(SendReceipt {
                     producer_id: send.producer_id(),
                     sequence_id: send.sequence_id(),
@@ -533,8 +535,8 @@ impl TryFrom<MessageCommand> for AckReciept {
 
     fn try_from(value: MessageCommand) -> Result<Self, Self::Error> {
         match value.command.type_() {
-            proto::pulsar::base_command::Type::ACK => {
-                let ack = value.command.ack.unwrap();
+            proto::pulsar::base_command::Type::ACK_RESPONSE => {
+                let ack = value.command.ackResponse.unwrap();
                 Ok(AckReciept {
                     consumer_id: ack.consumer_id(),
                     request_id: ack.request_id().into(),

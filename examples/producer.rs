@@ -42,13 +42,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&pulsar)
         .await?;
 
-    loop {
+    let mut batch = Vec::new();
+    for _ in 0..10000 {
         let data = Data {
             name: Utc::now().to_rfc3339(),
         };
-        if let Err(e) = producer.send(data).await {
-            log::error!("Error sending message: {}", e);
-            break;
+        batch.push(data);
+        if batch.len() == 100 {
+            if let Err(e) = producer.send_all(batch.clone()).await {
+                log::error!("Error sending message: {}", e);
+                break;
+            }
+            batch.clear();
         }
     }
 

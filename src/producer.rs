@@ -1,5 +1,5 @@
 use crate::{
-    client::Client,
+    client::{Client, PulsarClient},
     message::{Inbound, Outbound},
     PulsarManager,
 };
@@ -29,30 +29,33 @@ pub struct ProducerConfig {
 }
 
 #[allow(dead_code)]
-pub struct Producer<T>
+pub struct Producer<C, T>
 where
     T: ProducerDataTrait,
+    C: PulsarClient,
 {
     pub(crate) config: ProducerConfig,
     _phantom: std::marker::PhantomData<T>,
-    pub(crate) client: Client,
+    pub(crate) client: C,
 }
 
-impl<T> Producer<T>
+impl<C, T> Producer<C, T>
 where
     T: ProducerDataTrait,
+    C: PulsarClient,
 {
     async fn connect(&self) -> Result<(), NeutronError> {
+        self.client.connect().await?;
         self.client.lookup_topic(&self.config.topic).await?;
         self.client.producer(&self.config.topic).await
     }
 
     fn producer_id(&self) -> u64 {
-        self.client.client_id
+        self.client.client_id()
     }
 
     fn producer_name(&self) -> &str {
-        &self.client.client_name
+        &self.client.client_name()
     }
 
     pub async fn send(&self, message: T) -> Result<(), NeutronError> {
@@ -85,16 +88,18 @@ where
     }
 }
 
-pub struct ProducerBuilder<T>
+pub struct ProducerBuilder<C, T>
 where
     T: ProducerDataTrait,
+    C: PulsarClient,
 {
     producer_name: Option<String>,
     topic: Option<String>,
     _phantom: std::marker::PhantomData<T>,
+    _phantom_c: std::marker::PhantomData<C>,
 }
 
-impl<T> ProducerBuilder<T>
+impl<T> ProducerBuilder<Client, T>
 where
     T: ProducerDataTrait,
 {
@@ -103,6 +108,7 @@ where
             producer_name: None,
             topic: None,
             _phantom: std::marker::PhantomData,
+            _phantom_c: std::marker::PhantomData,
         }
     }
 
@@ -119,7 +125,7 @@ where
     pub async fn connect(
         self,
         pulsar_manager: &PulsarManager,
-    ) -> Result<Producer<T>, NeutronError> {
+    ) -> Result<Producer<Client, T>, NeutronError> {
         let name = self.producer_name.expect("Producer name is required");
         let topic = self.topic.unwrap();
         let id = pulsar_manager.new_client_id();
@@ -142,5 +148,145 @@ where
 
         producer.connect().await?;
         Ok(producer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        client::MockPulsarClient,
+        message::{proto::pulsar::MessageIdData, Connected, Inbound, SendReceipt},
+        Producer,
+    };
+
+    fn get_mock_client(next: Option<Vec<Inbound>>) -> MockPulsarClient {
+        let mut client = MockPulsarClient::new();
+        client
+            .expect_client_name()
+            .return_const("test_client".into());
+        client.expect_client_id().return_const(0u64);
+
+        if let Some(next) = next {
+            for message in next {
+                client.expect_next().return_once(|| Ok(message));
+            }
+        }
+
+        client
+    }
+
+    #[derive(Debug, Clone)]
+    struct Data {
+        pub data: String,
+    }
+
+    impl Into<Vec<u8>> for Data {
+        fn into(self) -> Vec<u8> {
+            self.data.into_bytes()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_base() {
+        let client = get_mock_client(None);
+        let producer: Producer<MockPulsarClient, Data> = Producer {
+            config: super::ProducerConfig {
+                topic: "test_topic".into(),
+            },
+            client,
+            _phantom: std::marker::PhantomData,
+        };
+
+        assert_eq!(producer.producer_name(), "test_client");
+        assert_eq!(producer.producer_id(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_connect_flow() {
+        let mut client = get_mock_client(None);
+        client.expect_connect().return_once(|| Ok(Connected));
+        client.expect_lookup_topic().return_once(|_| Ok(()));
+        client.expect_producer().return_once(|_| Ok(()));
+        let producer: Producer<MockPulsarClient, Data> = Producer {
+            config: super::ProducerConfig {
+                topic: "test_topic".into(),
+            },
+            client,
+            _phantom: std::marker::PhantomData,
+        };
+
+        producer.connect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send() {
+        let mut client = get_mock_client(None);
+        client
+            .expect_send_message()
+            .withf(|send| {
+                send.clone() == vec![104, 101, 108, 108, 111, 95, 119, 111, 114, 108, 100]
+            })
+            .return_once(|_| {
+                Ok(Box::pin(async {
+                    Ok(SendReceipt {
+                        message_id: MessageIdData::new(),
+                        producer_id: 0,
+                        sequence_id: 0,
+                    })
+                }))
+            });
+
+        let producer: Producer<MockPulsarClient, Data> = Producer {
+            config: super::ProducerConfig {
+                topic: "test_topic".into(),
+            },
+            client,
+            _phantom: std::marker::PhantomData,
+        };
+
+        producer
+            .send(Data {
+                data: "hello_world".into(),
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_send_all() {
+        let mut client = get_mock_client(None);
+        client
+            .expect_send_message()
+            .withf(|send| {
+                send.clone() == vec![104, 101, 108, 108, 111, 95, 119, 111, 114, 108, 100]
+            })
+            .times(100)
+            .returning(|_| {
+                Ok(Box::pin(async {
+                    Ok(SendReceipt {
+                        message_id: MessageIdData::new(),
+                        producer_id: 0,
+                        sequence_id: 0,
+                    })
+                }))
+            });
+
+        let producer: Producer<MockPulsarClient, Data> = Producer {
+            config: super::ProducerConfig {
+                topic: "test_topic".into(),
+            },
+            client,
+            _phantom: std::marker::PhantomData,
+        };
+
+        // generate list of data 100 long
+        let data = vec![
+            Data {
+                data: "hello_world".into(),
+            };
+            100
+        ];
+
+        producer.send_all(data).await.unwrap()
     }
 }

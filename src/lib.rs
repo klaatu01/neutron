@@ -15,6 +15,7 @@ mod producer;
 mod pulsar;
 
 pub use auth::*;
+pub use client::*;
 pub use consumer::*;
 pub use error::*;
 pub use producer::*;

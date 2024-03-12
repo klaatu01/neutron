@@ -1,4 +1,4 @@
-use crate::client::Client;
+use crate::client::{Client, PulsarClient};
 use crate::error::NeutronError;
 use crate::{
     message::{proto::pulsar::MessageIdData, Inbound, Outbound},
@@ -44,20 +44,22 @@ where
 }
 
 #[allow(dead_code)]
-pub struct Consumer<T>
+pub struct Consumer<C, T>
 where
     T: ConsumerDataTrait,
+    C: PulsarClient,
 {
     pub(crate) config: ConsumerConfig,
-    pub(crate) client: Client,
+    pub(crate) client: C,
     pub(crate) message_permits: u32,
     pub(crate) current_message_permits: AtomicU32,
-    pub(crate) plugins: Mutex<Vec<Box<dyn ConsumerPlugin<T> + Send + Sync>>>,
+    pub(crate) plugins: Mutex<Vec<Box<dyn ConsumerPlugin<C, T> + Send + Sync>>>,
 }
 
-impl<T> Consumer<T>
+impl<C, T> Consumer<C, T>
 where
     T: ConsumerDataTrait,
+    C: PulsarClient,
 {
     pub async fn next_message(&self) -> Result<Message<T>, NeutronError> {
         self.check_and_flow().await?;
@@ -110,7 +112,7 @@ where
     }
 
     async fn connect(&self) -> Result<(), NeutronError> {
-        log::info!("Connecting consumer: {}", self.client.client_name);
+        log::info!("Connecting consumer: {}", self.client.client_name());
         self.client.connect().await?;
         log::info!("Looking up topic: {}", self.config.topic);
         self.client.lookup_topic(&self.config.topic).await?;
@@ -122,18 +124,18 @@ where
         self.client
             .subscribe(&self.config.topic, &self.config.subscription)
             .await?;
-        log::info!("Flowing consumer: {}", self.client.client_name);
+        log::info!("Flowing consumer: {}", self.client.client_name());
         self.client.flow(self.message_permits * 2).await?;
-        log::info!("Connected consumer: {}", self.client.client_name);
+        log::info!("Connected consumer: {}", self.client.client_name());
         Ok(())
     }
 
     pub fn consumer_id(&self) -> u64 {
-        self.client.client_id
+        self.client.client_id()
     }
 
     pub fn consumer_name(&self) -> &str {
-        &self.client.client_name
+        &self.client.client_name()
     }
 }
 
@@ -143,9 +145,10 @@ pub trait ConsumerEngine {
 }
 
 #[async_trait]
-impl<T> ConsumerEngine for Consumer<T>
+impl<C, T> ConsumerEngine for Consumer<C, T>
 where
     T: ConsumerDataTrait,
+    C: PulsarClient + std::marker::Sync,
 {
     async fn consume(&self) -> Result<(), NeutronError> {
         loop {
@@ -160,36 +163,38 @@ where
 
 #[allow(unused_variables)]
 #[async_trait]
-pub trait ConsumerPlugin<T>
+pub trait ConsumerPlugin<C, T>
 where
+    C: PulsarClient,
     T: ConsumerDataTrait,
 {
-    async fn on_connect(&mut self, consumer: &Consumer<T>) -> Result<(), NeutronError> {
+    async fn on_connect(&mut self, consumer: &Consumer<C, T>) -> Result<(), NeutronError> {
         Ok(())
     }
-    async fn on_disconnect(&mut self, consumer: &Consumer<T>) -> Result<(), NeutronError> {
+    async fn on_disconnect(&mut self, consumer: &Consumer<C, T>) -> Result<(), NeutronError> {
         Ok(())
     }
     async fn on_message(
         &mut self,
-        consumer: &Consumer<T>,
+        consumer: &Consumer<C, T>,
         message: Message<T>,
     ) -> Result<(), NeutronError> {
         Ok(())
     }
 }
 
-pub struct ConsumerBuilder<T>
+pub struct ConsumerBuilder<C, T>
 where
     T: ConsumerDataTrait,
+    C: PulsarClient,
 {
-    plugins: Vec<Box<dyn ConsumerPlugin<T> + Send + Sync>>,
+    plugins: Vec<Box<dyn ConsumerPlugin<C, T> + Send + Sync>>,
     consumer_name: Option<String>,
     topic: Option<String>,
     subscription: Option<String>,
 }
 
-impl<T> ConsumerBuilder<T>
+impl<T> ConsumerBuilder<Client, T>
 where
     T: ConsumerDataTrait,
 {
@@ -219,7 +224,7 @@ where
 
     pub fn add_plugin<Plugin>(mut self, plugin: Plugin) -> Self
     where
-        Plugin: ConsumerPlugin<T> + Send + Sync + 'static,
+        Plugin: ConsumerPlugin<Client, T> + Send + Sync + 'static,
     {
         self.plugins.push(Box::new(plugin));
         self
@@ -228,7 +233,7 @@ where
     pub async fn connect(
         self,
         pulsar_manager: &PulsarManager,
-    ) -> Result<Consumer<T>, NeutronError> {
+    ) -> Result<Consumer<Client, T>, NeutronError> {
         let consumer_name = self.consumer_name.unwrap();
         let topic = self.topic.unwrap();
         let subscription = self.subscription.unwrap();
@@ -260,276 +265,160 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
-
-    use async_trait::async_trait;
-    use futures::lock::Mutex;
-    use tokio::sync::RwLock;
-
     use crate::{
-        engine::EngineConnection,
-        message::{proto::pulsar::MessageIdData, ClientInbound, ClientOutbound, Inbound, Outbound},
-        resolver_manager::ResolverManager,
-        Consumer, ConsumerPlugin, NeutronError,
+        client::MockPulsarClient,
+        message::{proto::pulsar::MessageIdData, Connected, Inbound},
+        Consumer, NeutronError,
     };
 
-    #[derive(Debug, Clone)]
-    struct TestConsumerData {
+    fn get_mock_client(next: Option<Vec<Inbound>>) -> MockPulsarClient {
+        let mut client = MockPulsarClient::new();
+        client
+            .expect_client_name()
+            .return_const("test_client".into());
+        client.expect_client_id().return_const(0u64);
+
+        if let Some(next) = next {
+            for message in next {
+                client.expect_next().return_once(|| Ok(message));
+            }
+        }
+
+        client
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Data {
         pub data: String,
     }
 
-    impl TryFrom<Vec<u8>> for TestConsumerData {
+    impl TryFrom<Vec<u8>> for Data {
         type Error = NeutronError;
 
-        fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-            Ok(TestConsumerData {
+        fn try_from(value: Vec<u8>) -> Result<Self, NeutronError> {
+            Ok(Data {
                 data: String::from_utf8(value).map_err(|_| NeutronError::DeserializationFailed)?,
             })
         }
     }
 
-    impl Into<Vec<u8>> for TestConsumerData {
-        fn into(self) -> Vec<u8> {
-            self.data.into_bytes()
-        }
+    #[tokio::test]
+    async fn test_base_consumer() {
+        let client = get_mock_client(None);
+        let consumer: Consumer<MockPulsarClient, Data> = Consumer {
+            config: crate::consumer::ConsumerConfig {
+                topic: "test_topic".into(),
+                subscription: "test_subscription".into(),
+            },
+            client,
+            message_permits: 250,
+            current_message_permits: std::sync::atomic::AtomicU32::new(0),
+            plugins: futures::lock::Mutex::new(Vec::new()),
+        };
+
+        assert_eq!(consumer.consumer_name(), "test_client");
+        assert_eq!(consumer.consumer_id(), 0);
     }
 
     #[tokio::test]
-    async fn consumer_connect_test() {
-        let (pulsar_engine_connection, consumer_connection) =
-            EngineConnection::<Outbound, Inbound>::pair();
-        let consumer_message_permits = 250;
-        let consumer: Consumer<TestConsumerData> = Consumer {
-            config: crate::ConsumerConfig {
-                consumer_name: "test".to_string(),
-                consumer_id: 0,
-                topic: "test".to_string(),
-                subscription: "test".to_string(),
+    async fn test_connect_flow() {
+        let mut client = get_mock_client(None);
+        client
+            .expect_connect()
+            .times(1)
+            .return_once(|| Ok(Connected));
+        client
+            .expect_lookup_topic()
+            .times(1)
+            .return_once(|_| Ok(()));
+        client
+            .expect_subscribe()
+            .times(1)
+            .return_once(|_, _| Ok(()));
+        client.expect_flow().times(1).return_once(|_| Ok(()));
+        let consumer: Consumer<MockPulsarClient, Data> = Consumer {
+            config: crate::consumer::ConsumerConfig {
+                topic: "test_topic".into(),
+                subscription: "test_subscription".into(),
             },
-            pulsar_engine_connection,
-            resolver_manager: ResolverManager::new(),
-            inbound_buffer: Mutex::new(Vec::new()),
-            message_permits: consumer_message_permits.clone(),
-            current_message_permits: RwLock::new(0),
-            plugins: Mutex::new(Vec::new()),
-            request_id: AtomicU64::new(0),
+            client,
+            message_permits: 250,
+            current_message_permits: std::sync::atomic::AtomicU32::new(0),
+            plugins: futures::lock::Mutex::new(Vec::new()),
         };
-        let mock_server = async move {
-            loop {
-                let outbound = consumer_connection.recv().await.unwrap();
-                match outbound {
-                    Outbound::Client(crate::message::ClientOutbound::LookupTopic {
-                        request_id,
-                        ..
-                    }) => {
-                        let _ = consumer_connection
-                            .send(Ok(Inbound::Client(
-                                crate::message::ClientInbound::LookupTopic {
-                                    request_id,
-                                    broker_service_url_tls: "test".to_string(),
-                                    broker_service_url: "test".to_string(),
-                                    response: crate::message::proto::pulsar::command_lookup_topic_response::LookupType::Connect,
-                                    authoritative: true
-                                },
-                            )))
-                            .await;
-                    }
-                    Outbound::Client(crate::message::ClientOutbound::Subscribe {
-                        request_id,
-                        ..
-                    }) => {
-                        let _ = consumer_connection
-                            .send(Ok(Inbound::Client(
-                                crate::message::ClientInbound::Success { request_id },
-                            )))
-                            .await;
-                    }
-                    Outbound::Client(crate::message::ClientOutbound::Flow {
-                        message_permits,
-                        ..
-                    }) => {
-                        assert!(message_permits == consumer_message_permits * 2);
-                        return Ok(());
-                    }
-                    _ => return Err(NeutronError::UnsupportedCommand),
-                }
-            }
-        };
-        let (consumer_connect_result, mock_server_result) =
-            tokio::join!(consumer.connect(), mock_server);
-        assert!(consumer_connect_result.is_ok());
-        assert!(mock_server_result.is_ok());
+
+        consumer.connect().await.unwrap();
     }
 
     #[tokio::test]
-    async fn can_handle_disconnect() {
-        let (pulsar_engine_connection, consumer_connection) =
-            EngineConnection::<Outbound, Inbound>::pair();
-        let consumer_message_permits = 250;
-        let consumer: Consumer<TestConsumerData> = Consumer {
-            config: crate::ConsumerConfig {
-                consumer_name: "test".to_string(),
-                consumer_id: 0,
-                topic: "test".to_string(),
-                subscription: "test".to_string(),
+    async fn test_ack() {
+        let mut client = get_mock_client(None);
+        client.expect_ack().times(1).return_once(|_| Ok(()));
+        let consumer: Consumer<MockPulsarClient, Data> = Consumer {
+            config: crate::consumer::ConsumerConfig {
+                topic: "test_topic".into(),
+                subscription: "test_subscription".into(),
             },
-            pulsar_engine_connection,
-            resolver_manager: ResolverManager::new(),
-            inbound_buffer: Mutex::new(Vec::new()),
-            message_permits: consumer_message_permits.clone(),
-            current_message_permits: RwLock::new(0),
-            plugins: Mutex::new(Vec::new()),
-            request_id: AtomicU64::new(0),
+            client,
+            message_permits: 250,
+            current_message_permits: std::sync::atomic::AtomicU32::new(0),
+            plugins: futures::lock::Mutex::new(Vec::new()),
         };
-        consumer_connection
-            .send(Err(NeutronError::Disconnected))
-            .await
-            .unwrap();
-        let output = consumer.consume().await;
-        assert!(output.is_err());
-        match output {
-            Err(NeutronError::Disconnected) => assert!(true),
-            _ => assert!(false),
-        }
-    }
 
-    struct AutoAckPlugin;
-
-    #[async_trait]
-    impl ConsumerPlugin<TestConsumerData> for AutoAckPlugin {
-        async fn on_message(
-            &mut self,
-            consumer: &Consumer<TestConsumerData>,
-            message: super::Message<TestConsumerData>,
-        ) -> Result<(), NeutronError> {
-            consumer.ack(&message.message_id).await?;
-            Ok(())
-        }
+        consumer.ack(&MessageIdData::new()).await.unwrap();
     }
 
     #[tokio::test]
-    async fn consumer_test() {
-        let (pulsar_engine_connection, consumer_connection) =
-            EngineConnection::<Outbound, Inbound>::pair();
-        let consumer_message_permits = 500;
-        let consumer: Consumer<TestConsumerData> = Consumer {
-            config: crate::ConsumerConfig {
-                consumer_name: "test".to_string(),
+    async fn test_message_recieve() {
+        let mut client = get_mock_client(None);
+        client.expect_next_message().times(3).returning(|| {
+            Ok(crate::message::Message {
+                payload: vec![104, 101, 108, 108, 111, 95, 119, 111, 114, 108, 100],
+                message_id: MessageIdData::new(),
                 consumer_id: 0,
-                topic: "test".to_string(),
-                subscription: "test".to_string(),
+            })
+        });
+        client.expect_flow().times(1).return_once(|_| Ok(()));
+        let consumer: Consumer<MockPulsarClient, Data> = Consumer {
+            config: crate::consumer::ConsumerConfig {
+                topic: "test_topic".into(),
+                subscription: "test_subscription".into(),
             },
-            pulsar_engine_connection,
-            resolver_manager: ResolverManager::new(),
-            inbound_buffer: Mutex::new(Vec::new()),
-            message_permits: consumer_message_permits.clone(),
-            current_message_permits: RwLock::new(0),
-            plugins: Mutex::new(vec![Box::new(AutoAckPlugin)]),
-            request_id: AtomicU64::new(0),
+            client,
+            message_permits: 2,
+            current_message_permits: std::sync::atomic::AtomicU32::new(0),
+            plugins: futures::lock::Mutex::new(Vec::new()),
         };
-        let mock_server = async move {
-            loop {
-                let outbound = consumer_connection.recv().await.unwrap();
-                match outbound {
-                    Outbound::Client(crate::message::ClientOutbound::LookupTopic {
-                        request_id,
-                        ..
-                    }) => {
-                        let _ = consumer_connection
-                            .send(Ok(Inbound::Client(
-                                crate::message::ClientInbound::LookupTopic {
-                                    request_id,
-                                    broker_service_url_tls: "test".to_string(),
-                                    broker_service_url: "test".to_string(),
-                                    response: crate::message::proto::pulsar::command_lookup_topic_response::LookupType::Connect,
-                                    authoritative: true
-                                },
-                            )))
-                            .await;
-                    }
-                    Outbound::Client(crate::message::ClientOutbound::Subscribe {
-                        request_id,
-                        ..
-                    }) => {
-                        let _ = consumer_connection
-                            .send(Ok(Inbound::Client(
-                                crate::message::ClientInbound::Success { request_id },
-                            )))
-                            .await;
-                    }
-                    Outbound::Client(crate::message::ClientOutbound::Flow {
-                        message_permits,
-                        ..
-                    }) => {
-                        assert!(message_permits == consumer_message_permits * 2);
-                        break;
-                    }
-                    _ => return Err(NeutronError::UnsupportedCommand),
-                }
+
+        let message: Data = consumer.next_message().await.unwrap().payload;
+
+        assert_eq!(
+            message,
+            Data {
+                data: "hello_world".into()
             }
-            for x in 0..10000 {
-                let mut message_id = MessageIdData::default();
-                message_id.set_entryId(x);
-                message_id.set_ledgerId(x);
-                let _ = consumer_connection
-                    .send(Ok(Inbound::Client(
-                        crate::message::ClientInbound::Message {
-                            consumer_id: 0,
-                            message_id: message_id.clone(),
-                            payload: TestConsumerData {
-                                data: "hello_world".to_string(),
-                            }
-                            .into(),
-                        },
-                    )))
-                    .await;
-            }
-            let mut count = 0;
-            loop {
-                let outbound = consumer_connection.recv().await.unwrap();
-                match outbound {
-                    Outbound::Client(ClientOutbound::Ack(ack)) => {
-                        let first = ack.first().cloned().unwrap();
-                        consumer_connection
-                            .send(Ok(Inbound::Client(ClientInbound::AckResponse {
-                                consumer_id: first.consumer_id,
-                                request_id: first.request_id,
-                            })))
-                            .await
-                            .unwrap();
-                        count += 1;
-                        if count == 10000 {
-                            consumer_connection
-                                .send(Err(NeutronError::Disconnected))
-                                .await
-                                .unwrap();
-                            return Ok(());
-                        }
-                    }
-                    Outbound::Client(crate::message::ClientOutbound::Flow {
-                        message_permits,
-                        ..
-                    }) => {
-                        continue;
-                    }
-                    _ => {
-                        return Err(NeutronError::UnsupportedCommand);
-                    }
-                }
-            }
-        };
-        let (consumer_start_result, mock_server_result) = tokio::join!(
-            async {
-                let result = consumer.connect().await;
-                assert!(result.is_ok());
-                consumer.consume().await
-            },
-            mock_server
         );
-        match consumer_start_result {
-            Err(e) if e.is_disconnect() => assert!(true),
-            _ => assert!(false),
-        }
-        assert!(mock_server_result.is_ok());
+
+        assert_eq!(
+            consumer
+                .current_message_permits
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        let _: Data = consumer.next_message().await.unwrap().payload;
+        assert_eq!(
+            consumer
+                .current_message_permits
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        let _: Data = consumer.next_message().await.unwrap().payload;
+        assert_eq!(
+            consumer
+                .current_message_permits
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 }

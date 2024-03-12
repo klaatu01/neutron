@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neutron::{ConsumerBuilder, ConsumerEngine, ConsumerPlugin, NeutronError};
+use neutron::{Client, ConsumerBuilder, ConsumerEngine, ConsumerPlugin, NeutronError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -28,10 +28,10 @@ pub struct PayloadLoggerPlugin;
 pub struct AutoAckPlugin;
 
 #[async_trait]
-impl ConsumerPlugin<Data> for PayloadLoggerPlugin {
+impl ConsumerPlugin<Client, Data> for PayloadLoggerPlugin {
     async fn on_message(
         &mut self,
-        consumer: &neutron::Consumer<Data>,
+        consumer: &neutron::Consumer<Client, Data>,
         message: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
         log::info!("{}: {}", consumer.consumer_name(), message.payload.name);
@@ -40,10 +40,10 @@ impl ConsumerPlugin<Data> for PayloadLoggerPlugin {
 }
 
 #[async_trait]
-impl ConsumerPlugin<Data> for AutoAckPlugin {
+impl ConsumerPlugin<Client, Data> for AutoAckPlugin {
     async fn on_message(
         &mut self,
-        consumer: &neutron::Consumer<Data>,
+        consumer: &neutron::Consumer<Client, Data>,
         message: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
         consumer.ack(&message.message_id).await?;
