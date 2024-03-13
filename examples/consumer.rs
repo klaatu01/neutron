@@ -27,7 +27,7 @@ impl Into<Vec<u8>> for Data {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let pulsar_config = neutron::PulsarConfig {
-        endpoint_url: "pulsar://127.0.0.1".to_string(),
+        endpoint_url: "pulsar://localhost".to_string(),
         endpoint_port: 6650,
     };
 
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     for _ in 0..10 {
-        let response: Message<Data> = consumer.next().await?;
+        let response: Message<Data> = consumer.next_message().await?;
         log::info!("Received message: {:?}", response.payload);
         consumer.ack(&response.message_id).await?;
     }

@@ -1,67 +1,65 @@
+use bimap::BiHashMap;
 use futures::FutureExt;
 
 use crate::{
-    connection_manager::BrokerAddress,
+    broker_address::BrokerAddress,
+    command_resolver::CommandResolver,
     engine::EngineConnection,
-    message::{Inbound, Outbound},
+    message::{Command, Inbound, Outbound},
     NeutronError,
 };
 
+#[derive(Clone)]
 pub struct ClientData {
     pub id: u64,
-    pub connection: EngineConnection<Inbound, Outbound>,
+    pub broker_address: BrokerAddress,
     pub topic: String,
-    pub broker_address: String,
 }
 
-pub enum Client {
-    Producer(ClientData),
-    Consumer(ClientData),
+#[derive(Debug)]
+pub struct ClientConnection {
+    pub id: u64,
+    pub connection: EngineConnection<Inbound, Command<Outbound, Inbound>>,
+    pub topic: String,
+    pub broker_address: BrokerAddress,
 }
 
-impl Client {
-    fn data(&self) -> &ClientData {
-        match self {
-            Client::Producer(data) => data,
-            Client::Consumer(data) => data,
+impl Into<ClientData> for &ClientConnection {
+    fn into(self) -> ClientData {
+        ClientData {
+            id: self.id,
+            broker_address: self.broker_address.clone(),
+            topic: self.topic.clone(),
         }
     }
+}
 
-    fn get_connection(&self) -> &EngineConnection<Inbound, Outbound> {
-        &self.data().connection
+impl ClientConnection {
+    fn get_connection(&self) -> &EngineConnection<Inbound, Command<Outbound, Inbound>> {
+        &self.connection
     }
 
-    fn broker_address(&self) -> &str {
-        &self.data().broker_address
-    }
-
-    fn is_producer(&self) -> bool {
-        match self {
-            Client::Producer(_) => true,
-            _ => false,
-        }
-    }
-
-    fn is_consumer(&self) -> bool {
-        match self {
-            Client::Consumer(_) => true,
-            _ => false,
-        }
+    fn broker_address(&self) -> &BrokerAddress {
+        &self.broker_address
     }
 }
 
 pub struct ClientManager {
-    clients: Vec<Client>,
+    clients: Vec<ClientConnection>,
+    pub(crate) command_resolver: CommandResolver<Outbound, Inbound>,
+    pub(crate) request_id_map: BiHashMap<(u64, u64), u64>,
 }
 
 impl ClientManager {
     pub fn new() -> Self {
         ClientManager {
             clients: Vec::new(),
+            command_resolver: CommandResolver::new(),
+            request_id_map: BiHashMap::new(),
         }
     }
 
-    pub fn add_client(&mut self, client: Client) {
+    pub fn add_client(&mut self, client: ClientConnection) {
         self.clients.push(client);
     }
 
@@ -69,18 +67,29 @@ impl ClientManager {
         self.clients.is_empty()
     }
 
-    pub async fn next(&self) -> (BrokerAddress, Result<Outbound, NeutronError>) {
+    pub async fn next(&self) -> (ClientData, Result<Outbound, NeutronError>) {
         let (next, _, _) = futures::future::select_all(self.clients.iter().map(|client| {
             async {
                 let connection = client.get_connection();
-                let broker_address = client.broker_address().to_string();
                 let message = connection.recv().await;
-                (broker_address, message)
+                (client.into(), message)
             }
             .boxed()
         }))
         .await;
-        next
+
+        let outbound = match next.1 {
+            Ok(cmd) => match cmd {
+                Command::RequestResponse(outbound, sender) => {
+                    self.command_resolver.put(outbound.clone(), sender).await;
+                    Ok(outbound)
+                }
+                _ => Ok(cmd.get_outbound()),
+            },
+            Err(err) => Err(err),
+        };
+
+        (next.0, outbound)
     }
 
     pub async fn send(
@@ -88,21 +97,22 @@ impl ClientManager {
         inbound: &Inbound,
         broker_address: &BrokerAddress,
     ) -> Result<(), NeutronError> {
+        if self.command_resolver.try_resolve(inbound.clone()).await {
+            return Ok(());
+        }
+
+        let consumer_or_producer_id = inbound.try_consumer_or_producer_id();
+
         let clients = self
             .clients
             .iter()
             .filter(|client| client.broker_address() == broker_address)
-            .filter(|client| match inbound.get_target() {
-                Some(target) => match target {
-                    crate::message::Target::Producer { producer_id } if client.is_producer() => {
-                        client.data().id == producer_id
-                    }
-                    crate::message::Target::Consumer { consumer_id } if client.is_consumer() => {
-                        client.data().id == consumer_id
-                    }
-                    _ => false,
-                },
-                None => true,
+            .filter(|client| {
+                if let Some(id) = consumer_or_producer_id {
+                    client.id == id
+                } else {
+                    true
+                }
             });
 
         futures::future::join_all(clients.map(|client| async {
@@ -128,16 +138,22 @@ impl ClientManager {
         Ok(())
     }
 
-    pub fn update_broker_address_for_topic(&mut self, topic: &str, broker_address: &str) {
-        for mut client in self.clients.iter_mut() {
-            match &mut client {
-                Client::Producer(data) | Client::Consumer(data) => {
-                    if data.topic == topic {
-                        println!("Updating broker address for topic: {}", topic);
-                        data.broker_address = broker_address.to_string();
-                    }
-                }
+    pub fn move_client_to_broker(&mut self, id: u64, broker_address: &BrokerAddress) {
+        log::debug!("clients: {:?}", self.clients);
+        for client in self.clients.iter_mut() {
+            if client.id == id {
+                log::debug!(
+                    "old broker: {:?}, new: {:?}",
+                    client.broker_address,
+                    broker_address
+                );
+                client.broker_address = broker_address.clone();
             }
         }
+        log::debug!("clients: {:?}", self.clients);
+    }
+
+    pub fn get_client(&self, id: u64) -> Option<&ClientConnection> {
+        self.clients.iter().find(|client| client.id == id)
     }
 }

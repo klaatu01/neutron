@@ -1,18 +1,13 @@
-use std::sync::atomic::AtomicU64;
-
 use crate::{
-    engine::{Engine, EngineConnection},
-    message::{
-        proto::pulsar::MessageIdData, Ack, ClientInbound, ClientOutbound, Inbound, Outbound,
-    },
-    resolver_manager::{Resolver, ResolverManager},
-    PulsarConfig, PulsarManager,
+    client::{Client, PulsarClient},
+    message::{Inbound, Outbound, SendReceipt},
+    PulsarManager,
 };
-use futures::lock::Mutex;
+use futures::future::join_all;
+use itertools::{Either, Itertools};
 #[cfg(feature = "json")]
 use serde::ser::Serialize;
 use serde::Deserialize;
-use tokio::sync::RwLock;
 
 use crate::error::NeutronError;
 
@@ -32,170 +27,84 @@ impl<T: Into<Vec<u8>> + Send + Sync + Clone> ProducerDataTrait for T {}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProducerConfig {
-    pub producer_name: Option<String>,
-    pub producer_id: u64,
     pub topic: String,
 }
 
-type ResultInbound = Result<Inbound, NeutronError>;
-type ResultOutbound = Result<Outbound, NeutronError>;
-
 #[allow(dead_code)]
-pub struct Producer<T>
+pub struct Producer<C, T>
 where
     T: ProducerDataTrait,
+    C: PulsarClient,
 {
-    pub(crate) config: RwLock<ProducerConfig>,
-    pulsar_engine_connection: EngineConnection<Outbound, Inbound>,
-    resolver_manager: ResolverManager<Inbound>,
-    inbound_buffer: Mutex<Vec<Inbound>>,
-    sequence_id: AtomicU64,
-    request_id: AtomicU64,
+    pub(crate) config: ProducerConfig,
     _phantom: std::marker::PhantomData<T>,
+    pub(crate) client: C,
 }
 
-impl<T> Producer<T>
+impl<C, T> Producer<C, T>
 where
     T: ProducerDataTrait,
+    C: PulsarClient,
 {
-    pub async fn resolve(
-        &self,
-        socket_connection: &EngineConnection<Outbound, Inbound>,
-        resolver: Resolver<Inbound>,
-    ) -> Result<Inbound, NeutronError> {
-        loop {
-            tokio::select! {
-                inbound = socket_connection.recv() => {
-                    match inbound {
-                        Ok(inbound) => {
-                            if !self.resolver_manager.try_resolve(&inbound).await {
-                                self.inbound_buffer.lock().await.push(inbound);
-                            }
-                        }
-                        Err(e) => {
-                            return Err(e)
-                        }
-                    }
-                }
-                inbound = resolver.recv() => {
-                    return inbound.map_err(|_| NeutronError::OperationTimeout);
-                }
-            }
-        }
+    async fn connect(&self) -> Result<(), NeutronError> {
+        self.client.connect().await?;
+        self.client.lookup_topic(&self.config.topic).await?;
+        self.client.producer(&self.config.topic).await
     }
 
-    pub async fn send_and_resolve(
-        &self,
-        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
-        outbound: &ResultOutbound,
-    ) -> ResultInbound {
-        match outbound {
-            Ok(outbound) => match self.resolver_manager.put_resolver(outbound).await {
-                Some(resolver) => {
-                    pulsar_engine_connection
-                        .send(Ok(outbound.clone()))
-                        .await
-                        .map_err(|_| NeutronError::ChannelTerminated)?;
-                    self.resolve(pulsar_engine_connection, resolver).await
-                }
-                _ => Err(NeutronError::Unresolvable),
-            },
-            Err(e) => Err(e.clone()),
-        }
+    fn producer_id(&self) -> u64 {
+        self.client.client_id()
     }
 
-    pub async fn lookup_topic(
-        &self,
-        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
-    ) -> Result<(), NeutronError> {
-        let outbound = {
-            let config = self.config.read().await;
-            Outbound::Client(ClientOutbound::LookupTopic {
-                topic: config.topic.clone(),
-                request_id: self
-                    .request_id
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-            })
-        };
-        let _ = self
-            .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
-            .await?;
-        Ok(())
-    }
-
-    pub async fn register(
-        &self,
-        pulsar_engine_connection: &EngineConnection<Outbound, Inbound>,
-    ) -> Result<(), NeutronError> {
-        let mut config = self.config.write().await;
-        let outbound = Outbound::Client(ClientOutbound::Producer {
-            producer_id: config.producer_id,
-            producer_name: config.producer_name.clone(),
-            topic: config.topic.clone(),
-            request_id: self
-                .request_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-        });
-        let inbound = self
-            .send_and_resolve(pulsar_engine_connection, &Ok(outbound))
-            .await?;
-        match inbound {
-            Inbound::Client(ClientInbound::ProducerSuccess { producer_name, .. }) => {
-                config.producer_name = Some(producer_name);
-                Ok(())
-            }
-            _ => Err(NeutronError::Unresolvable),
-        }
-    }
-
-    pub async fn connect(&self) -> Result<(), NeutronError> {
-        self.lookup_topic(&self.pulsar_engine_connection).await?;
-        self.register(&self.pulsar_engine_connection).await?;
-        Ok(())
-    }
-
-    async fn next_inbound(&self) -> Result<Inbound, NeutronError> {
-        let mut inbound_buffer = self.inbound_buffer.lock().await;
-        if let Some(inbound) = inbound_buffer.pop() {
-            Ok(inbound)
-        } else {
-            let inbound = self.pulsar_engine_connection.recv().await?;
-            Ok(inbound)
-        }
+    fn producer_name(&self) -> &str {
+        &self.client.client_name()
     }
 
     pub async fn send(&self, message: T) -> Result<(), NeutronError> {
-        let outbound = {
-            let config = self.config.read().await;
-            Outbound::Client(ClientOutbound::Send {
-                producer_name: config.producer_name.clone().unwrap(),
-                producer_id: config.producer_id,
-                sequence_id: self
-                    .sequence_id
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        #[cfg(feature = "json")]
+        let payload =
+            serde_json::to_vec(&message).map_err(|_| NeutronError::SerializationFailed)?;
+        #[cfg(not(feature = "json"))]
+        let payload = message.into();
+        self.client.send_message(payload).await?.await.map(|_| ())
+    }
+
+    pub async fn send_all(&self, messages: Vec<T>) -> Result<(), NeutronError> {
+        let responses = messages
+            .into_iter()
+            .map(|m| async move {
                 #[cfg(feature = "json")]
-                payload: serde_json::to_vec(&message)
-                    .map_err(|_| NeutronError::SerializationFailed)?,
+                let payload =
+                    serde_json::to_vec(&m).map_err(|_| NeutronError::SerializationFailed)?;
                 #[cfg(not(feature = "json"))]
-                payload: message.into(),
+                let payload = m.into();
+                self.client.send_message(payload).await
             })
-        };
-        self.send_and_resolve(&self.pulsar_engine_connection, &Ok(outbound))
-            .await?;
+            .collect::<Vec<_>>();
+
+        let (receipts, errors): (Vec<_>, Vec<NeutronError>) = futures::future::join_all(responses)
+            .await
+            .into_iter()
+            .partition_result();
+
+        futures::future::join_all(receipts).await;
+
         Ok(())
     }
 }
 
-pub struct ProducerBuilder<T>
+pub struct ProducerBuilder<C, T>
 where
     T: ProducerDataTrait,
+    C: PulsarClient,
 {
     producer_name: Option<String>,
     topic: Option<String>,
     _phantom: std::marker::PhantomData<T>,
+    _phantom_c: std::marker::PhantomData<C>,
 }
 
-impl<T> ProducerBuilder<T>
+impl<T> ProducerBuilder<Client, T>
 where
     T: ProducerDataTrait,
 {
@@ -204,6 +113,7 @@ where
             producer_name: None,
             topic: None,
             _phantom: std::marker::PhantomData,
+            _phantom_c: std::marker::PhantomData,
         }
     }
 
@@ -220,30 +130,168 @@ where
     pub async fn connect(
         self,
         pulsar_manager: &PulsarManager,
-    ) -> Result<Producer<T>, NeutronError> {
-        let producer_name = self.producer_name.unwrap();
+    ) -> Result<Producer<Client, T>, NeutronError> {
+        let name = self.producer_name.expect("Producer name is required");
         let topic = self.topic.unwrap();
-        let producer_id = pulsar_manager.producer_id();
-        let producer_config = ProducerConfig {
-            producer_name: Some(producer_name),
-            producer_id,
-            topic,
+        let id = pulsar_manager.new_client_id();
+
+        let config = ProducerConfig {
+            topic: topic.clone(),
         };
 
-        let pulsar_engine_connection = pulsar_manager.register_producer(&producer_config).await?;
+        let pulsar_engine_connection = pulsar_manager.register(topic, id).await?;
+
+        let client = Client::new(pulsar_engine_connection, id, name);
 
         let producer = Producer {
-            config: RwLock::new(producer_config),
-            pulsar_engine_connection,
-            resolver_manager: ResolverManager::new(),
-            inbound_buffer: Mutex::new(Vec::new()),
-            sequence_id: AtomicU64::new(0),
-            request_id: AtomicU64::new(0),
+            config,
+            client,
             _phantom: std::marker::PhantomData,
         };
 
-        producer.connect().await?;
+        log::info!("Created producer, producer_id: {}", producer.producer_id());
 
+        producer.connect().await?;
         Ok(producer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        client::MockPulsarClient,
+        message::{proto::pulsar::MessageIdData, Connected, Inbound, SendReceipt},
+        Producer,
+    };
+
+    fn get_mock_client(next: Option<Vec<Inbound>>) -> MockPulsarClient {
+        let mut client = MockPulsarClient::new();
+        client
+            .expect_client_name()
+            .return_const("test_client".into());
+        client.expect_client_id().return_const(0u64);
+
+        if let Some(next) = next {
+            for message in next {
+                client.expect_next().return_once(|| Ok(message));
+            }
+        }
+
+        client
+    }
+
+    #[derive(Debug, Clone)]
+    struct Data {
+        pub data: String,
+    }
+
+    impl Into<Vec<u8>> for Data {
+        fn into(self) -> Vec<u8> {
+            self.data.into_bytes()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_base() {
+        let client = get_mock_client(None);
+        let producer: Producer<MockPulsarClient, Data> = Producer {
+            config: super::ProducerConfig {
+                topic: "test_topic".into(),
+            },
+            client,
+            _phantom: std::marker::PhantomData,
+        };
+
+        assert_eq!(producer.producer_name(), "test_client");
+        assert_eq!(producer.producer_id(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_connect_flow() {
+        let mut client = get_mock_client(None);
+        client.expect_connect().return_once(|| Ok(Connected));
+        client.expect_lookup_topic().return_once(|_| Ok(()));
+        client.expect_producer().return_once(|_| Ok(()));
+        let producer: Producer<MockPulsarClient, Data> = Producer {
+            config: super::ProducerConfig {
+                topic: "test_topic".into(),
+            },
+            client,
+            _phantom: std::marker::PhantomData,
+        };
+
+        producer.connect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send() {
+        let mut client = get_mock_client(None);
+        client
+            .expect_send_message()
+            .withf(|send| {
+                send.clone() == vec![104, 101, 108, 108, 111, 95, 119, 111, 114, 108, 100]
+            })
+            .return_once(|_| {
+                Ok(Box::pin(async {
+                    Ok(SendReceipt {
+                        message_id: MessageIdData::new(),
+                        producer_id: 0,
+                        sequence_id: 0,
+                    })
+                }))
+            });
+
+        let producer: Producer<MockPulsarClient, Data> = Producer {
+            config: super::ProducerConfig {
+                topic: "test_topic".into(),
+            },
+            client,
+            _phantom: std::marker::PhantomData,
+        };
+
+        producer
+            .send(Data {
+                data: "hello_world".into(),
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_send_all() {
+        let mut client = get_mock_client(None);
+        client
+            .expect_send_message()
+            .withf(|send| {
+                send.clone() == vec![104, 101, 108, 108, 111, 95, 119, 111, 114, 108, 100]
+            })
+            .times(100)
+            .returning(|_| {
+                Ok(Box::pin(async {
+                    Ok(SendReceipt {
+                        message_id: MessageIdData::new(),
+                        producer_id: 0,
+                        sequence_id: 0,
+                    })
+                }))
+            });
+
+        let producer: Producer<MockPulsarClient, Data> = Producer {
+            config: super::ProducerConfig {
+                topic: "test_topic".into(),
+            },
+            client,
+            _phantom: std::marker::PhantomData,
+        };
+
+        // generate list of data 100 long
+        let data = vec![
+            Data {
+                data: "hello_world".into(),
+            };
+            100
+        ];
+
+        producer.send_all(data).await.unwrap()
     }
 }

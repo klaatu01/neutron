@@ -13,6 +13,7 @@ pub enum NeutronError {
     AuthenticationFailed(String),
     ConnectionFailed,
     InvalidUrl,
+    PulsarError(String),
 }
 
 impl NeutronError {
@@ -41,6 +42,7 @@ impl std::fmt::Display for NeutronError {
             NeutronError::AuthenticationFailed(e) => write!(f, "Authentication failed: {}", e),
             NeutronError::ConnectionFailed => write!(f, "Connection failed"),
             NeutronError::InvalidUrl => write!(f, "Invalid URL"),
+            NeutronError::PulsarError(e) => write!(f, "Pulsar error: {}", e),
         }
     }
 }

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neutron::{ConsumerBuilder, ConsumerPlugin, NeutronError};
+use neutron::{Client, ConsumerBuilder, ConsumerEngine, ConsumerPlugin, NeutronError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -43,10 +43,10 @@ impl Default for TransactionsPerSecondCounterPlugin {
 }
 
 #[async_trait]
-impl ConsumerPlugin<Data> for PayloadLoggerPlugin {
+impl ConsumerPlugin<Client, Data> for PayloadLoggerPlugin {
     async fn on_message(
         &mut self,
-        _: &neutron::Consumer<Data>,
+        _: &neutron::Consumer<Client, Data>,
         message: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
         log::info!("From plugin: {}", message.payload.name);
@@ -55,10 +55,10 @@ impl ConsumerPlugin<Data> for PayloadLoggerPlugin {
 }
 
 #[async_trait]
-impl ConsumerPlugin<Data> for AutoAckPlugin {
+impl ConsumerPlugin<Client, Data> for AutoAckPlugin {
     async fn on_message(
         &mut self,
-        consumer: &neutron::Consumer<Data>,
+        consumer: &neutron::Consumer<Client, Data>,
         message: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
         consumer.ack(&message.message_id).await?;
@@ -67,10 +67,10 @@ impl ConsumerPlugin<Data> for AutoAckPlugin {
 }
 
 #[async_trait]
-impl ConsumerPlugin<Data> for TransactionsPerSecondCounterPlugin {
+impl ConsumerPlugin<Client, Data> for TransactionsPerSecondCounterPlugin {
     async fn on_message(
         &mut self,
-        _: &neutron::Consumer<Data>,
+        _: &neutron::Consumer<Client, Data>,
         _: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
         if self.start_time.is_none() {

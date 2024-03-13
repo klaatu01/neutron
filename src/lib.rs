@@ -1,7 +1,10 @@
 mod auth;
+mod broker_address;
+mod client;
 mod client_manager;
 mod codec;
 mod combinators;
+mod command_resolver;
 mod connection;
 mod connection_manager;
 mod consumer;
@@ -10,10 +13,9 @@ mod error;
 mod message;
 mod producer;
 mod pulsar;
-mod resolver_manager;
-mod resolver_manager_v2;
 
 pub use auth::*;
+pub use client::*;
 pub use consumer::*;
 pub use error::*;
 pub use producer::*;

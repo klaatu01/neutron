@@ -7,7 +7,7 @@ use nom::IResult;
 use protobuf::Message as _;
 
 use crate::message::proto::pulsar::{BaseCommand, MessageMetadata};
-use crate::{error::NeutronError, message::Message};
+use crate::{error::NeutronError, message::MessageCommand};
 
 pub struct Codec;
 
@@ -74,9 +74,13 @@ impl From<std::io::Error> for NeutronError {
     }
 }
 
-impl tokio_util::codec::Encoder<Message> for Codec {
+impl tokio_util::codec::Encoder<MessageCommand> for Codec {
     type Error = NeutronError;
-    fn encode(&mut self, item: Message, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+    fn encode(
+        &mut self,
+        item: MessageCommand,
+        dst: &mut bytes::BytesMut,
+    ) -> Result<(), Self::Error> {
         let mut buf = Vec::new();
         let command_bytes = item.command.write_to_bytes().unwrap();
         let command_size = item.command.compute_size() as u32;
@@ -113,7 +117,7 @@ impl tokio_util::codec::Encoder<Message> for Codec {
 }
 
 impl tokio_util::codec::Decoder for Codec {
-    type Item = Message;
+    type Item = MessageCommand;
     type Error = NeutronError;
 
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -145,7 +149,7 @@ impl tokio_util::codec::Decoder for Codec {
 
             src.advance(message_size as usize);
 
-            let message = Message { command, payload };
+            let message = MessageCommand { command, payload };
 
             Ok(Some(message))
         } else {

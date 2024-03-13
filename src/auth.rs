@@ -72,6 +72,7 @@ impl ClientCredentialsOAuth2 {
 
         if let Some(cached_token) = cached_token.as_ref() {
             if !cached_token.is_expired() {
+                log::info!("Using cached token");
                 return Ok(cached_token.access_token.clone().into_bytes());
             }
         }
