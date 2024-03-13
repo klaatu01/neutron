@@ -136,6 +136,7 @@ impl PulsarConnection {
                                 _ => ()
                             }
                             log::debug!("-> {}", outbound.to_string());
+                            log::debug!("{:?}", outbound);
                             let msg: MessageCommand = outbound.into();
                             let _ = self
                                 .stream.send(msg).await;
@@ -171,6 +172,7 @@ impl PulsarConnection {
                     match &inbound {
                         Ok(inbound) => {
                             log::debug!("<- {}", inbound.to_string());
+                            log::debug!("{:?}", inbound);
                         }
                         Err(NeutronError::Disconnected) => {
                             log::warn!("Disconnected");

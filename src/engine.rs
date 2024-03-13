@@ -7,6 +7,7 @@ pub trait Engine<Input, Output> {
     async fn run(mut self) -> EngineConnection<Output, Input>;
 }
 
+#[derive(Debug)]
 pub struct EngineConnection<Input, Output> {
     tx: async_channel::Sender<Result<Input, NeutronError>>,
     rx: async_channel::Receiver<Result<Output, NeutronError>>,

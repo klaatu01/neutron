@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicU64;
 
 use crate::broker_address::BrokerAddress;
-use crate::client_manager::{ClientData, ClientManager};
+use crate::client_manager::{self, ClientConnection, ClientData, ClientManager};
 use crate::connection::PulsarConnection;
 use crate::connection_manager::ConnectionManager;
 use crate::engine::{Engine, EngineConnection};
@@ -43,7 +43,7 @@ type ResultOutbound = Result<Outbound, NeutronError>;
 
 enum Next {
     Inbound((BrokerAddress, ResultInbound)),
-    Outbound((BrokerAddress, ResultOutbound)),
+    Outbound((ClientData, ResultOutbound)),
     Registration(Result<ClientRegistration, NeutronError>),
 }
 
@@ -110,8 +110,9 @@ impl Pulsar {
                 connection
                     .send(Ok(Command::RequestResponse(Outbound::Connect(connect), tx)))
                     .await?;
-
+                log::info!("Awaiting response");
                 let response = rx.await.map_err(|_| NeutronError::ChannelTerminated)??;
+                log::info!("Received response: {:?}", response);
                 self.client_manager
                     .lock()
                     .await
@@ -128,9 +129,10 @@ impl Pulsar {
 
     async fn handle_client_outbound(
         &self,
-        broker_address: &BrokerAddress,
+        client_data: &ClientData,
         outbound: &ResultOutbound,
     ) -> Result<(), NeutronError> {
+        let ClientData { id, .. } = client_data;
         match outbound {
             Ok(outbound) => {
                 let outbound = match outbound {
@@ -162,14 +164,32 @@ impl Pulsar {
                             connect.auth_data = Some(auth_data);
                         }
 
-                        self.new_connection(connect.broker_address.as_ref().unwrap())
-                            .await?;
+                        let new_broker_address = connect.broker_address.as_ref().unwrap();
+
+                        self.new_connection(new_broker_address).await?;
+
+                        if new_broker_address != &self.config.broker_address() {
+                            self.client_manager
+                                .lock()
+                                .await
+                                .move_client_to_broker(*id, new_broker_address);
+                        }
 
                         Outbound::Connect(connect)
                     }
                     _ => outbound.clone(),
                 };
-                self.send_to_connection(broker_address, outbound).await
+
+                let broker_address = {
+                    let client_manager = self.client_manager.lock().await;
+                    client_manager
+                        .get_client(*id)
+                        .unwrap()
+                        .broker_address
+                        .clone()
+                };
+
+                self.send_to_connection(&broker_address, outbound).await
             }
             Err(e) => {
                 log::error!("Error in outbound: {}", e);
@@ -183,6 +203,7 @@ impl Pulsar {
         broker_address: &BrokerAddress,
         inbound: &ResultInbound,
     ) -> Result<(), NeutronError> {
+        log::info!("Received inbound from {}", broker_address);
         match inbound {
             Ok(inbound) => {
                 let inbound = match inbound {
@@ -226,7 +247,7 @@ impl Pulsar {
             topic,
             connection,
         } = registration;
-        let client_data = ClientData {
+        let client_data = ClientConnection {
             id,
             topic,
             connection,
@@ -265,6 +286,7 @@ impl Pulsar {
     async fn new_connection(&self, broker_address: &BrokerAddress) -> Result<(), NeutronError> {
         let mut connection_manager = self.connection_manager.lock().await;
         if connection_manager.get_connection(broker_address).is_some() {
+            log::info!("Connection to {} already exists", broker_address);
             return Ok(());
         }
 

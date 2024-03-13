@@ -213,6 +213,10 @@ impl TryFrom<MessageCommand> for Inbound {
             proto::pulsar::base_command::Type::PRODUCER_SUCCESS => {
                 ProducerSuccess::try_from(value).map(Inbound::ProducerSuccess)
             }
+            proto::pulsar::base_command::Type::ERROR => {
+                log::error!("Error: {:?}", value.command.error.message());
+                Err(NeutronError::UnsupportedCommand)
+            }
             _ => Err(NeutronError::UnsupportedCommand),
         }
     }
@@ -328,7 +332,7 @@ impl Into<Outbound> for Connect {
 impl Into<MessageCommand> for Connect {
     fn into(self) -> MessageCommand {
         let mut connect = proto::pulsar::CommandConnect::new();
-        connect.set_client_version("0.0.1".to_string());
+        connect.set_client_version("2.0.0-incubating".to_string());
         connect.set_protocol_version(21);
 
         if let Some(v) = self.auth_data {
@@ -336,8 +340,10 @@ impl Into<MessageCommand> for Connect {
             connect.set_auth_data(v.to_vec())
         }
 
-        if let Some(BrokerAddress::Proxy { proxy, .. }) = self.broker_address {
-            connect.set_proxy_to_broker_url(proxy);
+        if let Some(broker_address) = self.broker_address {
+            if let Some(proxy) = broker_address.get_proxy() {
+                connect.set_proxy_to_broker_url(proxy.to_string());
+            }
         }
 
         let mut base = proto::pulsar::BaseCommand::new();

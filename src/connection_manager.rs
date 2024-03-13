@@ -38,6 +38,7 @@ impl ConnectionManager {
     }
 
     pub async fn next(&self) -> (BrokerAddress, Result<Inbound, NeutronError>) {
+        log::debug!("Waiting for next message");
         let (next, _, _) = futures::future::select_all(self.connections.iter().map(
             |(broker_address, connection)| {
                 async {
@@ -56,6 +57,8 @@ impl ConnectionManager {
         broker_address: BrokerAddress,
         connection: EngineConnection<Command<Outbound, Inbound>, Inbound>,
     ) {
+        log::debug!("connections: {:?}", self.connections.keys());
+        log::debug!("Adding connection to {}", broker_address);
         self.connections.insert(broker_address, connection);
     }
 
@@ -63,6 +66,7 @@ impl ConnectionManager {
         &self,
         broker_address: &BrokerAddress,
     ) -> Option<&EngineConnection<Command<Outbound, Inbound>, Inbound>> {
+        log::debug!("Getting connection to {:?}", self.connections.keys());
         self.connections.get(broker_address)
     }
 

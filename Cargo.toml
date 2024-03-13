@@ -34,6 +34,7 @@ itertools = "0.12.1"
 protobuf-codegen = "3.3.0"
 
 [dev-dependencies]
+humantime = "2.1.0"
 mockall = "0.12.1"
 nanoid = "0.4.0"
 

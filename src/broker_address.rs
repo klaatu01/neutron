@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, hash::Hash};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum BrokerAddress {
@@ -24,7 +24,7 @@ impl BrokerAddress {
     pub fn get_proxy(&self) -> Option<&str> {
         match self {
             BrokerAddress::Direct { .. } => None,
-            BrokerAddress::Proxy { proxy, .. } => Some(proxy),
+            BrokerAddress::Proxy { proxy, .. } => Some(proxy.trim_start_matches("pulsar://")),
         }
     }
 

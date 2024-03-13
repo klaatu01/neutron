@@ -9,14 +9,32 @@ use crate::{
     NeutronError,
 };
 
+#[derive(Clone)]
 pub struct ClientData {
+    pub id: u64,
+    pub broker_address: BrokerAddress,
+    pub topic: String,
+}
+
+#[derive(Debug)]
+pub struct ClientConnection {
     pub id: u64,
     pub connection: EngineConnection<Inbound, Command<Outbound, Inbound>>,
     pub topic: String,
     pub broker_address: BrokerAddress,
 }
 
-impl ClientData {
+impl Into<ClientData> for &ClientConnection {
+    fn into(self) -> ClientData {
+        ClientData {
+            id: self.id,
+            broker_address: self.broker_address.clone(),
+            topic: self.topic.clone(),
+        }
+    }
+}
+
+impl ClientConnection {
     fn get_connection(&self) -> &EngineConnection<Inbound, Command<Outbound, Inbound>> {
         &self.connection
     }
@@ -27,7 +45,7 @@ impl ClientData {
 }
 
 pub struct ClientManager {
-    clients: Vec<ClientData>,
+    clients: Vec<ClientConnection>,
     pub(crate) command_resolver: CommandResolver<Outbound, Inbound>,
     pub(crate) request_id_map: BiHashMap<(u64, u64), u64>,
 }
@@ -41,7 +59,7 @@ impl ClientManager {
         }
     }
 
-    pub fn add_client(&mut self, client: ClientData) {
+    pub fn add_client(&mut self, client: ClientConnection) {
         self.clients.push(client);
     }
 
@@ -49,13 +67,12 @@ impl ClientManager {
         self.clients.is_empty()
     }
 
-    pub async fn next(&self) -> (BrokerAddress, Result<Outbound, NeutronError>) {
+    pub async fn next(&self) -> (ClientData, Result<Outbound, NeutronError>) {
         let (next, _, _) = futures::future::select_all(self.clients.iter().map(|client| {
             async {
                 let connection = client.get_connection();
-                let broker_address = client.broker_address();
                 let message = connection.recv().await;
-                (broker_address, message)
+                (client.into(), message)
             }
             .boxed()
         }))
@@ -72,7 +89,7 @@ impl ClientManager {
             Err(err) => Err(err),
         };
 
-        (next.0.clone(), outbound)
+        (next.0, outbound)
     }
 
     pub async fn send(
@@ -121,22 +138,22 @@ impl ClientManager {
         Ok(())
     }
 
-    pub fn update_broker_address_for_topic(&mut self, topic: &str, broker_address: &BrokerAddress) {
-        for mut client in self.clients.iter_mut() {
-            if client.topic == topic {
-                println!("Updating broker address for topic: {}", topic);
+    pub fn move_client_to_broker(&mut self, id: u64, broker_address: &BrokerAddress) {
+        log::debug!("clients: {:?}", self.clients);
+        for client in self.clients.iter_mut() {
+            if client.id == id {
+                log::debug!(
+                    "old broker: {:?}, new: {:?}",
+                    client.broker_address,
+                    broker_address
+                );
                 client.broker_address = broker_address.clone();
             }
         }
+        log::debug!("clients: {:?}", self.clients);
     }
 
-    pub fn move_clients_to_new_broker(&mut self, from: &BrokerAddress, to: &BrokerAddress) {
-        let mut clients = Vec::new();
-        for mut client in self.clients.iter_mut() {
-            if client.broker_address == *from {
-                client.broker_address = to.clone();
-            }
-        }
-        self.clients = clients;
+    pub fn get_client(&self, id: u64) -> Option<&ClientConnection> {
+        self.clients.iter().find(|client| client.id == id)
     }
 }

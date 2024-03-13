@@ -43,15 +43,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&pulsar)
         .await?;
 
-    let mut message_ids = Vec::new();
-    for _ in 0..1000000 {
+    for _ in 0..10 {
         let response: Message<Data> = consumer.next_message().await?;
         log::info!("Received message: {:?}", response.payload);
-        message_ids.push(response.message_id);
-        if message_ids.len() > 1000 {
-            consumer.ack_all(message_ids.clone()).await?;
-            message_ids.clear();
-        }
+        consumer.ack(&response.message_id).await?;
     }
     Ok(())
 }

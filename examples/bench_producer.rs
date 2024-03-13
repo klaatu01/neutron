@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -42,15 +44,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&pulsar)
         .await?;
 
-    loop {
+    let mut count = 0;
+    let start = std::time::Instant::now();
+
+    let mut batch = Vec::new();
+    for _ in 0..1000000 {
         let data = Data {
             name: Utc::now().to_rfc3339(),
         };
-        if let Err(e) = producer.send(data).await {
-            log::error!("Error sending message: {}", e);
-            break;
+        batch.push(data);
+        if batch.len() == 1000 {
+            log::info!("Sending batch of 1000 messages");
+            if let Err(e) = producer.send_all(batch.clone()).await {
+                log::error!("Error sending message: {}", e);
+                break;
+            }
+            if count > 0 {
+                print!("\x1B[1A");
+                print!("\x1B[1A");
+                print!("\x1B[1A");
+            }
+            count += 1000;
+
+            println!(
+                "\x1B[2K{} elapsed",
+                humantime::format_duration(start.elapsed())
+            );
+            println!("\x1B[2K{}/1000000 sent", count);
+            println!(
+                "\x1B[2K{} tps",
+                count as f64 / start.elapsed().as_secs_f64()
+            );
+
+            // Flush stdout to ensure the output is displayed immediately.
+            std::io::stdout().flush().unwrap();
+            batch.clear();
         }
     }
-
+    println!();
     Ok(())
 }
