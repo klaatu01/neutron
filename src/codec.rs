@@ -69,7 +69,7 @@ fn payload_frame(bytes: &[u8]) -> IResult<&[u8], PayloadFrame> {
 
 impl From<std::io::Error> for NeutronError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn from(err: std::io::Error) -> Self {
+    fn from(_err: std::io::Error) -> Self {
         NeutronError::Io
     }
 }
@@ -134,7 +134,6 @@ impl tokio_util::codec::Decoder for Codec {
             let (bytes, payload_frame) = match bytes.is_empty() {
                 false => payload_frame(bytes)
                     .map(|(bytes, p)| (bytes, Some(p)))
-                    .map_err(|e| e)
                     .unwrap_or((bytes, None)),
                 true => (bytes, None),
             };
@@ -147,7 +146,7 @@ impl tokio_util::codec::Decoder for Codec {
                 }
             });
 
-            src.advance(message_size as usize);
+            src.advance(message_size);
 
             let message = MessageCommand { command, payload };
 

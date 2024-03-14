@@ -18,9 +18,9 @@ impl TryFrom<Vec<u8>> for Data {
     }
 }
 
-impl Into<Vec<u8>> for Data {
-    fn into(self) -> Vec<u8> {
-        self.name.as_bytes().to_vec()
+impl From<Data> for Vec<u8> {
+    fn from(val: Data) -> Self {
+        val.name.as_bytes().to_vec()
     }
 }
 
@@ -28,19 +28,13 @@ pub struct PayloadLoggerPlugin;
 pub struct AutoAckPlugin;
 
 // recrd the number of messages recieved per second
+#[derive(Default)]
 pub struct TransactionsPerSecondCounterPlugin {
     pub transactions: u64,
     pub start_time: Option<std::time::Instant>,
 }
 
-impl Default for TransactionsPerSecondCounterPlugin {
-    fn default() -> Self {
-        TransactionsPerSecondCounterPlugin {
-            transactions: 0,
-            start_time: None,
-        }
-    }
-}
+
 
 #[async_trait]
 impl ConsumerPlugin<Client, Data> for PayloadLoggerPlugin {

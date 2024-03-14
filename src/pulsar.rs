@@ -1,12 +1,12 @@
 use std::sync::atomic::AtomicU64;
 
 use crate::broker_address::BrokerAddress;
-use crate::client_manager::{self, ClientConnection, ClientData, ClientManager};
+use crate::client_manager::{ClientConnection, ClientData, ClientManager};
 use crate::connection::PulsarConnection;
 use crate::connection_manager::ConnectionManager;
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
-use crate::message::{self, Command, Connect, Connected};
+use crate::message::{self, Command};
 use crate::message::{Inbound, Outbound};
 use crate::AuthenticationPlugin;
 use futures::lock::Mutex;
@@ -75,7 +75,6 @@ impl Pulsar {
                         Ok(Next::Inbound(inbound))
                     }
                     new_registration = registration_manager_connection.recv() => {
-                        log::info!("Registration received");
                         Ok(Next::Registration(new_registration))
                     }
                 }
@@ -83,7 +82,6 @@ impl Pulsar {
             (_, client_manager, Some(registration_manager_connection))
                 if client_manager.is_empty() =>
             {
-                log::info!("Awaiting Registration");
                 let registration = registration_manager_connection.recv().await?;
                 Ok(Next::Registration(Ok(registration)))
             }
@@ -110,9 +108,7 @@ impl Pulsar {
                 connection
                     .send(Ok(Command::RequestResponse(Outbound::Connect(connect), tx)))
                     .await?;
-                log::info!("Awaiting response");
                 let response = rx.await.map_err(|_| NeutronError::ChannelTerminated)??;
-                log::info!("Received response: {:?}", response);
                 self.client_manager
                     .lock()
                     .await
@@ -143,7 +139,7 @@ impl Pulsar {
                             Some(BrokerAddress::Proxy { proxy, url }) => {
                                 let proxy = proxy.clone();
 
-                                let url = if url != "" {
+                                let url = if !url.is_empty() {
                                     url.to_string()
                                 } else {
                                     self.config.broker_address().base_url().to_string()
@@ -203,7 +199,6 @@ impl Pulsar {
         broker_address: &BrokerAddress,
         inbound: &ResultInbound,
     ) -> Result<(), NeutronError> {
-        log::info!("Received inbound from {}", broker_address);
         match inbound {
             Ok(inbound) => {
                 let inbound = match inbound {
@@ -215,7 +210,6 @@ impl Pulsar {
                         })
                     }
                     Inbound::Ping => {
-                        log::info!("Received ping from {}", broker_address);
                         self.connection_manager
                             .lock()
                             .await
@@ -286,7 +280,6 @@ impl Pulsar {
     async fn new_connection(&self, broker_address: &BrokerAddress) -> Result<(), NeutronError> {
         let mut connection_manager = self.connection_manager.lock().await;
         if connection_manager.get_connection(broker_address).is_some() {
-            log::info!("Connection to {} already exists", broker_address);
             return Ok(());
         }
 
@@ -345,19 +338,15 @@ pub(crate) struct ClientRegistration {
     connection: EngineConnection<Inbound, Command<Outbound, Inbound>>,
 }
 
-impl ClientRegistration {
-    pub fn get_id(&self) -> u64 {
-        self.id
-    }
-
-    pub fn get_connection(&self) -> &EngineConnection<Inbound, Command<Outbound, Inbound>> {
-        &self.connection
-    }
-}
-
 pub struct PulsarBuilder {
     config: Option<PulsarConfig>,
     auth_plugin: Option<Box<dyn AuthenticationPlugin + Send + Sync + 'static>>,
+}
+
+impl Default for PulsarBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PulsarBuilder {
@@ -398,19 +387,19 @@ pub struct PulsarManager {
 }
 
 impl PulsarManager {
-    pub fn new(inner_connection: EngineConnection<ClientRegistration, ()>) -> Self {
+    pub(crate) fn new(inner_connection: EngineConnection<ClientRegistration, ()>) -> Self {
         Self {
             client_id_generator: AtomicU64::new(0),
             inner_connection,
         }
     }
 
-    pub fn new_client_id(&self) -> u64 {
+    pub(crate) fn new_client_id(&self) -> u64 {
         self.client_id_generator
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub async fn register(
+    pub(crate) async fn register(
         &self,
         topic: String,
         client_id: u64,

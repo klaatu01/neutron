@@ -19,9 +19,9 @@ impl TryFrom<Vec<u8>> for Data {
     }
 }
 
-impl Into<Vec<u8>> for Data {
-    fn into(self) -> Vec<u8> {
-        self.name.as_bytes().to_vec()
+impl From<Data> for Vec<u8> {
+    fn from(val: Data) -> Self {
+        val.name.as_bytes().to_vec()
     }
 }
 

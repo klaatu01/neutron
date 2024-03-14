@@ -1,12 +1,9 @@
 use crate::client::{Client, PulsarClient};
 use crate::error::NeutronError;
-use crate::{
-    message::{proto::pulsar::MessageIdData, Inbound, Outbound},
-    PulsarManager,
-};
+use crate::{message::proto::pulsar::MessageIdData, PulsarManager};
 use async_trait::async_trait;
 use futures::lock::Mutex;
-use itertools::{Either, Itertools};
+use itertools::Itertools;
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -31,9 +28,6 @@ pub struct ConsumerConfig {
     pub topic: String,
     pub subscription: String,
 }
-
-pub(crate) type ResultInbound = Result<Inbound, NeutronError>;
-pub(crate) type ResultOutbound = Result<Outbound, NeutronError>;
 
 #[derive(Debug, Clone)]
 pub struct Message<T>
@@ -104,7 +98,7 @@ where
             .map(|m| self.client.ack(m))
             .collect::<Vec<_>>();
 
-        let (receipts, errors): (Vec<_>, Vec<NeutronError>) = futures::future::join_all(responses)
+        let (receipts, _errors): (Vec<_>, Vec<NeutronError>) = futures::future::join_all(responses)
             .await
             .into_iter()
             .partition_result();
@@ -129,11 +123,11 @@ where
     }
 
     async fn connect(&self) -> Result<(), NeutronError> {
-        log::info!("Connecting consumer: {}", self.client.client_name());
+        log::debug!("Connecting consumer: {}", self.client.client_name());
         self.client.connect().await?;
-        log::info!("Looking up topic: {}", self.config.topic);
+        log::debug!("Looking up topic: {}", self.config.topic);
         self.client.lookup_topic(&self.config.topic).await?;
-        log::info!(
+        log::debug!(
             "Subscribing to topic: {} with subscription: {}",
             self.config.topic,
             self.config.subscription
@@ -141,9 +135,9 @@ where
         self.client
             .subscribe(&self.config.topic, &self.config.subscription)
             .await?;
-        log::info!("Flowing consumer: {}", self.client.client_name());
+        log::debug!("Flowing consumer: {}", self.client.client_name());
         self.client.flow(self.message_permits * 2).await?;
-        log::info!("Connected consumer: {}", self.client.client_name());
+        log::debug!("Connected consumer: {}", self.client.client_name());
         Ok(())
     }
 
@@ -152,7 +146,7 @@ where
     }
 
     pub fn consumer_name(&self) -> &str {
-        &self.client.client_name()
+        self.client.client_name()
     }
 }
 
@@ -209,6 +203,15 @@ where
     consumer_name: Option<String>,
     topic: Option<String>,
     subscription: Option<String>,
+}
+
+impl<T> Default for ConsumerBuilder<Client, T>
+where
+    T: ConsumerDataTrait,
+{
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T> ConsumerBuilder<Client, T>
@@ -282,9 +285,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    
+
     use crate::{
         client::MockPulsarClient,
-        message::{proto::pulsar::MessageIdData, Connected, Inbound},
+        message::{proto::pulsar::MessageIdData, AckReciept, Connected, Inbound},
         Consumer, NeutronError,
     };
 
@@ -370,7 +375,15 @@ mod tests {
     #[tokio::test]
     async fn test_ack() {
         let mut client = get_mock_client(None);
-        client.expect_ack().times(1).return_once(|_| Ok(()));
+        client.expect_ack().times(1).return_once(|_| {
+            let future = async {
+                Ok(AckReciept {
+                    consumer_id: 0,
+                    request_id: 0,
+                })
+            };
+            Ok(Box::pin(future))
+        });
         let consumer: Consumer<MockPulsarClient, Data> = Consumer {
             config: crate::consumer::ConsumerConfig {
                 topic: "test_topic".into(),
