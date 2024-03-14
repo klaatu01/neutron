@@ -96,7 +96,7 @@ impl tokio_util::codec::Encoder<MessageCommand> for Codec {
         buf.put_u32(command_size);
         buf.put_slice(&command_bytes);
 
-        item.payload.map(|payload| {
+        if let Some(payload) = item.payload {
             let mut payload_buf = Vec::new();
             payload_buf.put_u16(0x0e01);
             payload_buf.put_u32(0);
@@ -106,7 +106,7 @@ impl tokio_util::codec::Encoder<MessageCommand> for Codec {
             let checksum = crc32c::crc32c(&payload_buf[6..]);
             payload_buf[2..6].copy_from_slice(&checksum.to_be_bytes());
             buf.put_slice(&payload_buf);
-        });
+        };
 
         if dst.remaining_mut() < buf.len() {
             dst.reserve(buf.len());

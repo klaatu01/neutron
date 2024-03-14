@@ -3,7 +3,7 @@ use crate::{
     PulsarManager,
 };
 
-use itertools::{Itertools};
+use itertools::Itertools;
 #[cfg(feature = "json")]
 use serde::ser::Serialize;
 use serde::Deserialize;
@@ -55,6 +55,7 @@ where
         self.client.client_id()
     }
 
+    #[allow(dead_code)]
     fn producer_name(&self) -> &str {
         self.client.client_name()
     }
@@ -106,7 +107,7 @@ where
 impl<T> Default for ProducerBuilder<Client, T>
 where
     T: ProducerDataTrait,
- {
+{
     fn default() -> Self {
         Self::new()
     }

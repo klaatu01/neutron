@@ -18,11 +18,10 @@ pub enum NeutronError {
 
 impl NeutronError {
     pub fn is_disconnect(&self) -> bool {
-        match self {
-            NeutronError::Disconnected => true,
-            NeutronError::ChannelTerminated => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            NeutronError::Disconnected | NeutronError::ChannelTerminated
+        )
     }
 }
 

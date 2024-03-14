@@ -235,7 +235,7 @@ impl Pulsar {
         &self,
         registration_manager_connection: &EngineConnection<(), ClientRegistration>,
         registration: ClientRegistration,
-    ) {
+    ) -> Result<(), NeutronError> {
         let ClientRegistration {
             id,
             topic,
@@ -249,7 +249,7 @@ impl Pulsar {
         };
         let mut client_manager = self.client_manager.lock().await;
         client_manager.add_client(client_data);
-        registration_manager_connection.send(Ok(())).await;
+        registration_manager_connection.send(Ok(())).await
     }
 
     async fn handle_next(&mut self, next: Next) -> Result<(), NeutronError> {
@@ -267,7 +267,7 @@ impl Pulsar {
                 {
                     if let Ok(registration) = registration {
                         self.handle_registration(registration_manager_connection, registration)
-                            .await;
+                            .await?;
                     } else {
                         log::error!("Error in registration: {:?}", registration.err().unwrap());
                     }

@@ -129,12 +129,9 @@ impl PulsarConnection {
                     match outbound {
                         Ok(command) => {
                             let outbound = command.get_outbound();
-                            match command {
-                                Command::RequestResponse(outbound, sender) => {
-                                    self.command_resolver.put(outbound, sender).await;
-                                },
-                                _ => ()
-                            }
+                            if let Command::RequestResponse(outbound, sender) = command {
+                                self.command_resolver.put(outbound, sender).await;
+                            };
                             log::debug!("-> {}", outbound.to_string());
                             let msg: MessageCommand = outbound.into();
                             let _ = self
@@ -186,7 +183,7 @@ impl PulsarConnection {
                         if self.command_resolver.try_resolve(inbound.clone()).await {
                             continue
                         }
-                        if let Err(_) = client_connection.send(Ok(inbound.clone())).await {
+                        if client_connection.send(Ok(inbound.clone())).await.is_err() {
                             break;
                         }
                     }
