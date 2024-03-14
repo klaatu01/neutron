@@ -1,10 +1,9 @@
 use crate::{
     client::{Client, PulsarClient},
-    message::{Inbound, Outbound, SendReceipt},
     PulsarManager,
 };
-use futures::future::join_all;
-use itertools::{Either, Itertools};
+
+use itertools::Itertools;
 #[cfg(feature = "json")]
 use serde::ser::Serialize;
 use serde::Deserialize;
@@ -56,8 +55,9 @@ where
         self.client.client_id()
     }
 
+    #[allow(dead_code)]
     fn producer_name(&self) -> &str {
-        &self.client.client_name()
+        self.client.client_name()
     }
 
     pub async fn send(&self, message: T) -> Result<(), NeutronError> {
@@ -82,7 +82,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        let (receipts, errors): (Vec<_>, Vec<NeutronError>) = futures::future::join_all(responses)
+        let (receipts, _errors): (Vec<_>, Vec<NeutronError>) = futures::future::join_all(responses)
             .await
             .into_iter()
             .partition_result();
@@ -102,6 +102,15 @@ where
     topic: Option<String>,
     _phantom: std::marker::PhantomData<T>,
     _phantom_c: std::marker::PhantomData<C>,
+}
+
+impl<T> Default for ProducerBuilder<Client, T>
+where
+    T: ProducerDataTrait,
+{
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T> ProducerBuilder<Client, T>
@@ -185,9 +194,9 @@ mod tests {
         pub data: String,
     }
 
-    impl Into<Vec<u8>> for Data {
-        fn into(self) -> Vec<u8> {
-            self.data.into_bytes()
+    impl From<Data> for Vec<u8> {
+        fn from(val: Data) -> Self {
+            val.data.into_bytes()
         }
     }
 

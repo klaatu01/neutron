@@ -14,17 +14,17 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         ConnectionManager {
             connections: HashMap::new(),
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.connections.is_empty()
     }
 
-    pub async fn send(
+    pub(crate) async fn send(
         &mut self,
         message: Result<Command<Outbound, Inbound>, NeutronError>,
         broker_address: &BrokerAddress,
@@ -37,8 +37,7 @@ impl ConnectionManager {
         connection.send(message).await
     }
 
-    pub async fn next(&self) -> (BrokerAddress, Result<Inbound, NeutronError>) {
-        log::debug!("Waiting for next message");
+    pub(crate) async fn next(&self) -> (BrokerAddress, Result<Inbound, NeutronError>) {
         let (next, _, _) = futures::future::select_all(self.connections.iter().map(
             |(broker_address, connection)| {
                 async {
@@ -52,28 +51,18 @@ impl ConnectionManager {
         next
     }
 
-    pub fn add_connection(
+    pub(crate) fn add_connection(
         &mut self,
         broker_address: BrokerAddress,
         connection: EngineConnection<Command<Outbound, Inbound>, Inbound>,
     ) {
-        log::debug!("connections: {:?}", self.connections.keys());
-        log::debug!("Adding connection to {}", broker_address);
         self.connections.insert(broker_address, connection);
     }
 
-    pub fn get_connection(
+    pub(crate) fn get_connection(
         &self,
         broker_address: &BrokerAddress,
     ) -> Option<&EngineConnection<Command<Outbound, Inbound>, Inbound>> {
-        log::debug!("Getting connection to {:?}", self.connections.keys());
         self.connections.get(broker_address)
-    }
-
-    pub fn remove_connection(
-        &mut self,
-        broker_address: &BrokerAddress,
-    ) -> Option<EngineConnection<Command<Outbound, Inbound>, Inbound>> {
-        self.connections.remove(broker_address)
     }
 }

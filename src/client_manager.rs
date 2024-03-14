@@ -1,4 +1,4 @@
-use bimap::BiHashMap;
+
 use futures::FutureExt;
 
 use crate::{
@@ -17,19 +17,19 @@ pub struct ClientData {
 }
 
 #[derive(Debug)]
-pub struct ClientConnection {
-    pub id: u64,
-    pub connection: EngineConnection<Inbound, Command<Outbound, Inbound>>,
-    pub topic: String,
-    pub broker_address: BrokerAddress,
+pub(crate) struct ClientConnection {
+    pub(crate) id: u64,
+    pub(crate) connection: EngineConnection<Inbound, Command<Outbound, Inbound>>,
+    pub(crate) topic: String,
+    pub(crate) broker_address: BrokerAddress,
 }
 
-impl Into<ClientData> for &ClientConnection {
-    fn into(self) -> ClientData {
+impl From<&ClientConnection> for ClientData {
+    fn from(val: &ClientConnection) -> Self {
         ClientData {
-            id: self.id,
-            broker_address: self.broker_address.clone(),
-            topic: self.topic.clone(),
+            id: val.id,
+            broker_address: val.broker_address.clone(),
+            topic: val.topic.clone(),
         }
     }
 }
@@ -44,30 +44,28 @@ impl ClientConnection {
     }
 }
 
-pub struct ClientManager {
+pub(crate) struct ClientManager {
     clients: Vec<ClientConnection>,
     pub(crate) command_resolver: CommandResolver<Outbound, Inbound>,
-    pub(crate) request_id_map: BiHashMap<(u64, u64), u64>,
 }
 
 impl ClientManager {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         ClientManager {
             clients: Vec::new(),
             command_resolver: CommandResolver::new(),
-            request_id_map: BiHashMap::new(),
         }
     }
 
-    pub fn add_client(&mut self, client: ClientConnection) {
+    pub(crate) fn add_client(&mut self, client: ClientConnection) {
         self.clients.push(client);
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.clients.is_empty()
     }
 
-    pub async fn next(&self) -> (ClientData, Result<Outbound, NeutronError>) {
+    pub(crate) async fn next(&self) -> (ClientData, Result<Outbound, NeutronError>) {
         let (next, _, _) = futures::future::select_all(self.clients.iter().map(|client| {
             async {
                 let connection = client.get_connection();
@@ -92,7 +90,7 @@ impl ClientManager {
         (next.0, outbound)
     }
 
-    pub async fn send(
+    pub(crate) async fn send(
         &self,
         inbound: &Inbound,
         broker_address: &BrokerAddress,
@@ -124,7 +122,8 @@ impl ClientManager {
         Ok(())
     }
 
-    pub async fn send_all(
+    #[allow(dead_code)]
+    pub(crate) async fn send_all(
         &self,
         inbound: &Result<Inbound, NeutronError>,
     ) -> Result<(), NeutronError> {
@@ -138,22 +137,15 @@ impl ClientManager {
         Ok(())
     }
 
-    pub fn move_client_to_broker(&mut self, id: u64, broker_address: &BrokerAddress) {
-        log::debug!("clients: {:?}", self.clients);
+    pub(crate) fn move_client_to_broker(&mut self, id: u64, broker_address: &BrokerAddress) {
         for client in self.clients.iter_mut() {
             if client.id == id {
-                log::debug!(
-                    "old broker: {:?}, new: {:?}",
-                    client.broker_address,
-                    broker_address
-                );
                 client.broker_address = broker_address.clone();
             }
         }
-        log::debug!("clients: {:?}", self.clients);
     }
 
-    pub fn get_client(&self, id: u64) -> Option<&ClientConnection> {
+    pub(crate) fn get_client(&self, id: u64) -> Option<&ClientConnection> {
         self.clients.iter().find(|client| client.id == id)
     }
 }

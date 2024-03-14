@@ -18,9 +18,9 @@ impl TryFrom<Vec<u8>> for Data {
     }
 }
 
-impl Into<Vec<u8>> for Data {
-    fn into(self) -> Vec<u8> {
-        self.name.as_bytes().to_vec()
+impl From<Data> for Vec<u8> {
+    fn from(val: Data) -> Self {
+        val.name.as_bytes().to_vec()
     }
 }
 
@@ -82,6 +82,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&pulsar)
         .await?;
 
-    let handle = tokio::join!(consumer_a.consume(), consumer_b.consume());
+    let _handle = tokio::join!(consumer_a.consume(), consumer_b.consume());
     Ok(())
 }

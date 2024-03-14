@@ -74,7 +74,7 @@ impl ConnectionStream {
 impl PulsarConnection {
     pub async fn connect(broker_address: BrokerAddress) -> Result<Self, NeutronError> {
         let broker_url =
-            Url::parse(&broker_address.base_url()).map_err(|_| NeutronError::InvalidUrl)?;
+            Url::parse(broker_address.base_url()).map_err(|_| NeutronError::InvalidUrl)?;
         log::info!("Connecting to {}", broker_url);
 
         let host = broker_url
@@ -129,14 +129,10 @@ impl PulsarConnection {
                     match outbound {
                         Ok(command) => {
                             let outbound = command.get_outbound();
-                            match command {
-                                Command::RequestResponse(outbound, sender) => {
-                                    self.command_resolver.put(outbound, sender).await;
-                                },
-                                _ => ()
-                            }
+                            if let Command::RequestResponse(outbound, sender) = command {
+                                self.command_resolver.put(outbound, sender).await;
+                            };
                             log::debug!("-> {}", outbound.to_string());
-                            log::debug!("{:?}", outbound);
                             let msg: MessageCommand = outbound.into();
                             let _ = self
                                 .stream.send(msg).await;
@@ -187,7 +183,7 @@ impl PulsarConnection {
                         if self.command_resolver.try_resolve(inbound.clone()).await {
                             continue
                         }
-                        if let Err(_) = client_connection.send(Ok(inbound.clone())).await {
+                        if client_connection.send(Ok(inbound.clone())).await.is_err() {
                             break;
                         }
                     }

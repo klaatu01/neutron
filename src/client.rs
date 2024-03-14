@@ -25,6 +25,8 @@ pub struct Client {
     pub(crate) sequence_id: AtomicU64,
 }
 
+type RecieptFuture<T> = Pin<Box<dyn Future<Output = Result<T, NeutronError>> + Send>>;
+
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait PulsarClient {
@@ -43,12 +45,12 @@ pub trait PulsarClient {
     async fn ack(
         &self,
         message_id: &MessageIdData,
-    ) -> Result<Pin<Box<dyn Future<Output = Result<AckReciept, NeutronError>> + Send>>, NeutronError>;
+    ) -> Result<RecieptFuture<AckReciept>, NeutronError>;
 
     async fn send_message(
         &self,
         payload: Vec<u8>,
-    ) -> Result<Pin<Box<dyn Future<Output = Result<SendReceipt, NeutronError>> + Send>>, NeutronError>;
+    ) -> Result<RecieptFuture<SendReceipt>, NeutronError>;
 
     async fn next_message(&self) -> Result<message::Message, NeutronError>;
 
