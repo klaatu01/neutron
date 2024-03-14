@@ -2,8 +2,11 @@
 name = "neutron"
 version = "0.0.1"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "MIT"
+description = "A Rust client library for Pulsar"
+repository = "https://github.com/klaatu01/neutron"
+readme = "README.md"
+keywords = ["pulsar", "client", "neutron" ]
 
 [dependencies]
 async-channel = "2.1.1"
