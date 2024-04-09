@@ -1,16 +1,22 @@
 use std::fmt::{Display, Formatter};
 
+use bytes::{BufMut, BytesMut};
 use chrono::Utc;
-use protobuf::MessageField;
+use nom::{
+    bytes::streaming::take,
+    combinator::{map_res, verify},
+    number::streaming::be_u32,
+    IResult,
+};
+use protobuf::{Message as _, MessageField};
 
 use crate::{
-    broker_address::BrokerAddress,
-    codec::Payload,
-    command_resolver::{ResolverKey},
-    NeutronError,
+    broker_address::BrokerAddress, codec::Payload, command_resolver::ResolverKey, NeutronError,
 };
 
-use self::proto::pulsar::{AuthData, BaseCommand, MessageIdData, MessageMetadata};
+use self::proto::pulsar::{
+    AuthData, BaseCommand, MessageIdData, MessageMetadata, SingleMessageMetadata,
+};
 
 pub mod proto {
     #![allow(clippy::all)]
@@ -93,7 +99,7 @@ impl ResolverKey for Outbound {
     fn try_key(&self) -> Option<String> {
         match self {
             Outbound::Connect(_) => Some("CONNECT".to_string()),
-            Outbound::Send(Send { sequence_id, .. }) => Some(format!("SEND:{}", sequence_id)),
+            Outbound::Send(send) => Some(format!("SEND:{}", send.sequence_id())),
             Outbound::Ack(_) => Some("ACK".to_string()),
             Outbound::LookupTopic(_) => Some("LOOKUP".to_string()),
             Outbound::Subscribe(_) => Some("SUBSCRIBE".to_string()),
@@ -158,7 +164,7 @@ impl Inbound {
         match self {
             Inbound::SendReceipt(receipt) => Some(receipt.producer_id),
             Inbound::AckReciept(receipt) => Some(receipt.consumer_id),
-            Inbound::Message(message) => Some(message.consumer_id),
+            Inbound::Message(message) => Some(message.consumer_id()),
             _ => None,
         }
     }
@@ -384,13 +390,77 @@ impl TryFrom<MessageCommand> for Connected {
 }
 
 // Send
+#[derive(Debug, Clone)]
+pub enum Send {
+    Single {
+        producer_name: String,
+        producer_id: u64,
+        sequence_id: u64,
+        payload: Vec<u8>,
+    },
+    Batch {
+        producer_name: String,
+        producer_id: u64,
+        sequence_id: u64,
+        payloads: Vec<Vec<u8>>,
+    },
+}
 
 #[derive(Debug, Clone)]
-pub struct Send {
-    pub producer_name: String,
-    pub producer_id: u64,
-    pub sequence_id: u64,
+pub struct BatchedPayload {
+    pub metadata: SingleMessageMetadata,
     pub payload: Vec<u8>,
+}
+
+impl Send {
+    pub fn producer_name(&self) -> &str {
+        match self {
+            Send::Single { producer_name, .. } => producer_name,
+            Send::Batch { producer_name, .. } => producer_name,
+        }
+    }
+
+    pub fn producer_id(&self) -> u64 {
+        match self {
+            Send::Single { producer_id, .. } => *producer_id,
+            Send::Batch { producer_id, .. } => *producer_id,
+        }
+    }
+
+    pub fn sequence_id(&self) -> u64 {
+        match self {
+            Send::Single { sequence_id, .. } => *sequence_id,
+            Send::Batch { sequence_id, .. } => *sequence_id,
+        }
+    }
+
+    pub fn number_of_messages(&self) -> u32 {
+        match self {
+            Send::Single { .. } => 1,
+            Send::Batch { payloads, .. } => payloads.len() as u32,
+        }
+    }
+
+    pub fn payload(self) -> Vec<u8> {
+        match self {
+            Send::Single { payload, .. } => payload.clone(),
+            Send::Batch { payloads, .. } => {
+                let mut buffer = BytesMut::new();
+
+                for payload in payloads {
+                    let mut metadata = SingleMessageMetadata::new();
+                    metadata.set_payload_size(payload.len() as i32);
+                    let metadata_size = metadata.compute_size() as u32;
+                    let metadata_bytes = metadata.write_to_bytes().unwrap();
+                    buffer.put_u32(metadata_size);
+                    buffer.put_slice(&metadata_bytes);
+                    buffer.put_slice(&payload);
+                }
+
+                buffer.to_vec()
+            }
+        }
+    }
 }
 
 impl From<Send> for Outbound {
@@ -403,26 +473,29 @@ impl From<Send> for MessageCommand {
     fn from(val: Send) -> Self {
         let command = {
             let mut send = proto::pulsar::CommandSend::new();
-            send.set_producer_id(val.producer_id);
-            send.set_sequence_id(val.sequence_id);
-            send.set_num_messages(1);
+            send.set_producer_id(val.producer_id());
+            send.set_sequence_id(val.sequence_id());
+            send.set_num_messages(val.number_of_messages() as i32);
             let mut base = proto::pulsar::BaseCommand::new();
             base.send = MessageField::some(send);
             base.set_type(proto::pulsar::base_command::Type::SEND);
             base
         };
 
-        let payload = {
+        let metadata = {
             let now_as_millis = Utc::now().timestamp_millis() as u64;
             let mut metadata = MessageMetadata::new();
-            metadata.set_producer_name(val.producer_name);
-            metadata.set_sequence_id(val.sequence_id);
+            metadata.set_producer_name(val.producer_name().to_string());
+            metadata.set_sequence_id(val.sequence_id());
             metadata.set_publish_time(now_as_millis);
             metadata.set_event_time(now_as_millis);
-            Payload {
-                metadata,
-                data: val.payload,
-            }
+            metadata.set_num_messages_in_batch(val.number_of_messages() as i32);
+            metadata
+        };
+
+        let payload = Payload {
+            metadata,
+            data: val.payload(),
         };
 
         MessageCommand {
@@ -553,13 +626,33 @@ impl TryFrom<MessageCommand> for AckReciept {
     }
 }
 
-// Message
-
 #[derive(Debug, Clone)]
-pub struct Message {
+pub struct SingleMessage {
     pub consumer_id: u64,
     pub message_id: MessageIdData,
     pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchMessage {
+    pub consumer_id: u64,
+    pub message_id: MessageIdData,
+    pub payloads: Vec<BatchedPayload>,
+}
+// Message
+#[derive(Debug, Clone)]
+pub enum Message {
+    Single(SingleMessage),
+    Batch(BatchMessage),
+}
+
+impl Message {
+    pub fn consumer_id(&self) -> u64 {
+        match self {
+            Message::Single(msg) => msg.consumer_id,
+            Message::Batch(msg) => msg.consumer_id,
+        }
+    }
 }
 
 impl TryFrom<Inbound> for Message {
@@ -573,6 +666,36 @@ impl TryFrom<Inbound> for Message {
     }
 }
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+fn batched_payload(i: &[u8]) -> IResult<&[u8], BatchedPayload> {
+    let (i, metadata_size) = be_u32(i)?;
+    let (i, metadata) = verify(
+        map_res(take(metadata_size), SingleMessageMetadata::parse_from_bytes),
+        // payload_size is defined as i32 in protobuf
+        |metadata| metadata.payload_size() >= 0,
+    )(i)?;
+
+    let (i, payload) = take(metadata.payload_size() as u32)(i)?;
+
+    Ok((
+        i,
+        BatchedPayload {
+            metadata,
+            payload: payload.to_vec(),
+        },
+    ))
+}
+
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+pub(crate) fn parse_batched_message(
+    count: u32,
+    payload: &[u8],
+) -> Result<Vec<BatchedPayload>, NeutronError> {
+    let (_, result) = nom::multi::count(batched_payload, count as usize)(payload)
+        .map_err(|_| NeutronError::DecodeFailed)?;
+    Ok(result)
+}
+
 impl TryFrom<MessageCommand> for Message {
     type Error = NeutronError;
 
@@ -580,13 +703,26 @@ impl TryFrom<MessageCommand> for Message {
         match value.command.type_() {
             proto::pulsar::base_command::Type::MESSAGE => {
                 let message_id = value.command.message.message_id.clone().unwrap();
-                let payload = value.payload.as_ref().unwrap().data.clone();
+                let payload = value.payload.as_ref().unwrap();
+                let metadata = payload.metadata.clone();
+                let payload = payload.data.clone();
                 let consumer_id = value.command.message.consumer_id();
-                Ok(Message {
-                    consumer_id,
-                    message_id,
-                    payload,
-                })
+                if metadata.num_messages_in_batch() > 1 {
+                    Ok(Message::Batch(BatchMessage {
+                        consumer_id,
+                        message_id,
+                        payloads: parse_batched_message(
+                            metadata.num_messages_in_batch() as u32,
+                            &payload,
+                        )?,
+                    }))
+                } else {
+                    Ok(Message::Single(SingleMessage {
+                        consumer_id,
+                        message_id,
+                        payload,
+                    }))
+                }
             }
             _ => Err(NeutronError::Unresolvable),
         }

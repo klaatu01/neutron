@@ -91,6 +91,25 @@ where
 
         Ok(())
     }
+
+    pub async fn send_batch(&self, messages: Vec<T>) -> Result<(), NeutronError> {
+        let payloads: Vec<Vec<u8>> = messages
+            .into_iter()
+            .map(|m| {
+                #[cfg(feature = "json")]
+                let payload = serde_json::to_vec(&m).unwrap();
+                #[cfg(not(feature = "json"))]
+                let payload = m.into();
+                payload
+            })
+            .collect::<Vec<_>>();
+
+        self.client
+            .send_batch_message(payloads)
+            .await?
+            .await
+            .map(|_| ())
+    }
 }
 
 pub struct ProducerBuilder<C, T>

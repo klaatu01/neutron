@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         batch.push(data);
         if batch.len() == 1000 {
             log::info!("Sending batch of 1000 messages");
-            if let Err(e) = producer.send_all(batch.clone()).await {
+            if let Err(e) = producer.send_batch(batch.clone()).await {
                 log::error!("Error sending message: {}", e);
                 break;
             }

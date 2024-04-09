@@ -30,11 +30,29 @@ pub struct ConsumerConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct Message<T>
+pub enum Message<T>
+where
+    T: ConsumerDataTrait,
+{
+    Single(SingleMessage<T>),
+    Batch(BatchMessage<T>),
+}
+
+#[derive(Debug, Clone)]
+pub struct SingleMessage<T>
 where
     T: ConsumerDataTrait,
 {
     pub payload: T,
+    pub message_id: MessageIdData,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchMessage<T>
+where
+    T: ConsumerDataTrait,
+{
+    pub payloads: Vec<T>,
     pub message_id: MessageIdData,
 }
 
@@ -59,25 +77,57 @@ where
     pub async fn next_message(&self) -> Result<Message<T>, NeutronError> {
         self.check_and_flow().await?;
 
-        let crate::message::Message {
-            payload,
-            message_id,
-            ..
-        } = self.client.next_message().await?;
+        let next_message = self.client.next_message().await?;
 
-        #[cfg(feature = "json")]
-        let message: Message<T> = Message {
-            payload: serde_json::from_slice(&payload)
-                .map_err(|_| NeutronError::DeserializationFailed)?,
-            message_id: message_id.clone(),
-        };
+        let message = match next_message {
+            crate::message::Message::Single(crate::message::SingleMessage {
+                payload,
+                message_id,
+                ..
+            }) => {
+                #[cfg(feature = "json")]
+                let message: Message<T> = Message::Single(SingleMessage {
+                    payload: serde_json::from_slice(&payload)
+                        .map_err(|_| NeutronError::DeserializationFailed)?,
+                    message_id: message_id.clone(),
+                });
 
-        #[cfg(not(feature = "json"))]
-        let message: Message<T> = Message {
-            payload: payload
-                .try_into()
-                .map_err(|_| NeutronError::DeserializationFailed)?,
-            message_id: message_id.clone(),
+                #[cfg(not(feature = "json"))]
+                let message: Message<T> = Message::Single(SingleMessage {
+                    payload: payload
+                        .try_into()
+                        .map_err(|_| NeutronError::DeserializationFailed)?,
+                    message_id: message_id.clone(),
+                });
+
+                message
+            }
+            crate::message::Message::Batch(batch) => {
+                let messages = batch
+                    .payloads
+                    .into_iter()
+                    .map(|m| {
+                        #[cfg(feature = "json")]
+                        let message: T = serde_json::from_slice(&m.payload)
+                            .map_err(|_| NeutronError::DeserializationFailed)
+                            .unwrap();
+
+                        #[cfg(not(feature = "json"))]
+                        let message: T = m
+                            .payload
+                            .try_into()
+                            .map_err(|_| NeutronError::DeserializationFailed)
+                            .unwrap();
+
+                        message
+                    })
+                    .collect::<Vec<_>>();
+
+                Message::Batch(BatchMessage {
+                    payloads: messages,
+                    message_id: batch.message_id.clone(),
+                })
+            }
         };
 
         // increase message permit count
@@ -285,7 +335,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    
 
     use crate::{
         client::MockPulsarClient,
