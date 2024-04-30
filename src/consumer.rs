@@ -78,11 +78,11 @@ where
                 ..
             }) => {
                 #[cfg(feature = "json")]
-                let message: Message<T> = Message::Single(SingleMessage {
+                let message: Message<T> = Message {
                     payload: serde_json::from_slice(&payload)
                         .map_err(|_| NeutronError::DeserializationFailed)?,
-                    message_id: message_id.clone(),
-                });
+                    ack: message_id.clone().into(),
+                };
 
                 #[cfg(not(feature = "json"))]
                 let message: Message<T> = Message {
