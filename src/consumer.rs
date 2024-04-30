@@ -70,6 +70,7 @@ where
 {
     async fn next(&self) -> Result<Vec<Message<T>>, NeutronError> {
         let next_message = self.client.next_message().await?;
+
         let messages = match next_message {
             crate::message::Message::Single(crate::message::SingleMessage {
                 payload,
@@ -77,11 +78,11 @@ where
                 ..
             }) => {
                 #[cfg(feature = "json")]
-                let message: Message<T> = Message::Single(SingleMessage {
+                let message: Message<T> = Message {
                     payload: serde_json::from_slice(&payload)
                         .map_err(|_| NeutronError::DeserializationFailed)?,
-                    message_id: message_id.clone(),
-                });
+                    ack: message_id.clone().into(),
+                };
 
                 #[cfg(not(feature = "json"))]
                 let message: Message<T> = Message {
@@ -145,12 +146,12 @@ where
         }
 
         if messages.len() == max_size {
+            self.current_message_permits
+                .fetch_add(messages.len() as u32, std::sync::atomic::Ordering::Relaxed);
             return Ok(messages);
         }
 
         let mut next_messages = self.next().await?;
-
-        let size_before = messages.len() as u32;
 
         while messages.len() < max_size {
             match next_messages.pop() {
@@ -159,10 +160,10 @@ where
             }
         }
 
-        let message_permits = messages.len() as u32 - size_before;
+        let message_permits = messages.len();
 
         self.current_message_permits
-            .fetch_add(message_permits, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(message_permits as u32, std::sync::atomic::Ordering::Relaxed);
 
         Ok(messages)
     }
@@ -215,7 +216,10 @@ where
                 .current_message_permits
                 .load(std::sync::atomic::Ordering::Relaxed);
             if current_message_permits >= self.message_permits {
-                self.client.flow(self.message_permits * 2).await?;
+                let overflow = current_message_permits - self.message_permits;
+                self.client
+                    .flow(self.message_permits * 2 + overflow)
+                    .await?;
                 self.current_message_permits
                     .store(0, std::sync::atomic::Ordering::Relaxed);
             }
