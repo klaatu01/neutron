@@ -1,10 +1,6 @@
 # Neutron - **This package is currently a Work In Progress and is NOT Production Ready**
 
 An [Apache Pulsar](https://github.com/apache/pulsar) client library, built with pure rust 🦀 and requires no C++ dependencies.
-Neutron is built with a focus on:
-
-- Extensability through Plugins.
-- Simplicity by reducing the complexity of the internal client.
 
 ## Features:
 
@@ -15,6 +11,7 @@ Neutron is built with a focus on:
 - [x] Multi/Dual Consumer & Producer Support 🤝
 - [x] TLS Support via [rustls](https://github.com/rustls/rustls) 🔐
 - [x] Async Resolution of Send & Acks 🪓
+- [x] Batching Support 📦
 - [ ] Automatic Reconnection ♻️
 - [ ] Automatic Operation Retry 🚀
 
@@ -33,13 +30,56 @@ cargo add neutron
 As this is currently in prerelease you **must** use the git ssh address directly.
 
 ```toml
-neutron = { git = "git@github.com/klaatu01/neutron.git" }
+neutron = "0.0.2"
 ```
 
 ## Features
 
 The `json` feature provides automatic de/serialization through `serde_json`.
 
-## Usage
+```toml
+neutron = { version = "0.0.2", features = ["json"] }
+```
 
-There are two ways to use a Consumer or Producer client; As stream/sink or by starting it as a task.
+## Example
+
+This is a simple example of a consumer that listens to a topic and prints the message. **with the `json` feature enabled**
+
+```rust
+use neutron::{ConsumerBuilder, Message};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[allow(dead_code)]
+struct Data {
+    name: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+    let pulsar_config = neutron::PulsarConfig {
+        endpoint_url: "pulsar://localhost".to_string(),
+        endpoint_port: 6650,
+    };
+
+    let pulsar = neutron::PulsarBuilder::new()
+        .with_config(pulsar_config)
+        .build()
+        .run();
+
+    let consumer = ConsumerBuilder::new()
+        .with_topic("test")
+        .with_subscription("test")
+        .with_consumer_name("test")
+        .connect(&pulsar)
+        .await?;
+
+
+    loop {
+        let response: Message<Data> = consumer.next_message().await?;
+        log::info!("Received message: {:?}", response.payload);
+        consumer.ack(&response.ack).await?;
+    }
+}
+```

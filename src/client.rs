@@ -52,6 +52,11 @@ pub trait PulsarClient {
         payload: Vec<u8>,
     ) -> Result<RecieptFuture<SendReceipt>, NeutronError>;
 
+    async fn send_batch_message(
+        &self,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<RecieptFuture<SendReceipt>, NeutronError>;
+
     async fn next_message(&self) -> Result<message::Message, NeutronError>;
 
     async fn flow(&self, message_permits: u32) -> Result<(), NeutronError>;
@@ -221,11 +226,25 @@ impl PulsarClient for Client {
         payload: Vec<u8>,
     ) -> Result<Pin<Box<dyn Future<Output = Result<SendReceipt, NeutronError>> + Send>>, NeutronError>
     {
-        self.send_command_and_resolve::<_, SendReceipt>(message::Send {
+        self.send_command_and_resolve::<_, SendReceipt>(message::Send::Single {
             producer_name: self.client_name.clone(),
             producer_id: self.client_id,
             sequence_id: self.sequence_id.fetch_add(1, Ordering::SeqCst),
             payload,
+        })
+        .await
+    }
+
+    async fn send_batch_message(
+        &self,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Pin<Box<dyn Future<Output = Result<SendReceipt, NeutronError>> + Send>>, NeutronError>
+    {
+        self.send_command_and_resolve::<_, SendReceipt>(message::Send::Batch {
+            producer_name: self.client_name.clone(),
+            producer_id: self.client_id,
+            sequence_id: self.sequence_id.fetch_add(1, Ordering::SeqCst),
+            payloads,
         })
         .await
     }

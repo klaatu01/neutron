@@ -31,10 +31,10 @@ pub struct AutoAckPlugin;
 impl ConsumerPlugin<Client, Data> for PayloadLoggerPlugin {
     async fn on_message(
         &mut self,
-        consumer: &neutron::Consumer<Client, Data>,
+        _: &neutron::Consumer<Client, Data>,
         message: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
-        log::info!("{}: {}", consumer.consumer_name(), message.payload.name);
+        log::info!("Received message: {:?}", message.payload);
         Ok(())
     }
 }
@@ -46,7 +46,7 @@ impl ConsumerPlugin<Client, Data> for AutoAckPlugin {
         consumer: &neutron::Consumer<Client, Data>,
         message: neutron::Message<Data>,
     ) -> Result<(), NeutronError> {
-        consumer.ack(&message.message_id).await?;
+        consumer.ack(&message.ack).await?;
         Ok(())
     }
 }

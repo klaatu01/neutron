@@ -53,9 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             name: Utc::now().to_rfc3339(),
         };
         batch.push(data);
-        if batch.len() == 1000 {
+        if batch.len() == 2 {
             log::info!("Sending batch of 1000 messages");
-            if let Err(e) = producer.send_all(batch.clone()).await {
+            if let Err(e) = producer.send_batch(batch.clone()).await {
                 log::error!("Error sending message: {}", e);
                 break;
             }
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print!("\x1B[1A");
                 print!("\x1B[1A");
             }
-            count += 1000;
+            count += 1;
 
             println!(
                 "\x1B[2K{} elapsed",

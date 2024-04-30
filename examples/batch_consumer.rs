@@ -46,10 +46,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut count = 0;
 
     while count < 1000000 {
-        let response: Message<Data> = consumer.next_message().await?;
-        log::info!("Received message: {:?}", response.payload);
-        count += 1;
-        consumer.ack(&response.ack).await?;
+        let response: Vec<Message<Data>> = consumer.next_batch(100).await?;
+        response.iter().for_each(|msg| {
+            log::info!("Received message: {:?}", msg.payload);
+            count += 1;
+        });
+        consumer
+            .ack_all(response.into_iter().map(|msg| msg.ack).collect())
+            .await?;
     }
     Ok(())
 }
