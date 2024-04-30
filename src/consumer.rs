@@ -153,6 +153,8 @@ where
 
         let mut next_messages = self.next().await?;
 
+        let size_before = messages.len() as u32;
+
         while messages.len() < max_size {
             match next_messages.pop() {
                 Some(message) => messages.push(message),
