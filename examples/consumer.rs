@@ -43,10 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&pulsar)
         .await?;
 
-    for _ in 0..1000000 {
+    let mut count = 0;
+
+    while count < 1000000 {
         let response: Message<Data> = consumer.next_message().await?;
         log::info!("Received message: {:?}", response.payload);
-        consumer.ack(&response.message_id).await?;
+        count += 1;
+        consumer.ack(&response.ack).await?;
     }
     Ok(())
 }

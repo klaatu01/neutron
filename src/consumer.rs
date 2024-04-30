@@ -30,30 +30,23 @@ pub struct ConsumerConfig {
 }
 
 #[derive(Debug, Clone)]
-pub enum Message<T>
-where
-    T: ConsumerDataTrait,
-{
-    Single(SingleMessage<T>),
-    Batch(BatchMessage<T>),
-}
-
-#[derive(Debug, Clone)]
-pub struct SingleMessage<T>
+pub struct Message<T>
 where
     T: ConsumerDataTrait,
 {
     pub payload: T,
-    pub message_id: MessageIdData,
+    pub ack: Ack,
 }
 
 #[derive(Debug, Clone)]
-pub struct BatchMessage<T>
-where
-    T: ConsumerDataTrait,
-{
-    pub payloads: Vec<T>,
-    pub message_id: MessageIdData,
+pub struct Ack {
+    pub(crate) message_id: MessageIdData,
+}
+
+impl From<MessageIdData> for Ack {
+    fn from(message_id: MessageIdData) -> Self {
+        Self { message_id }
+    }
 }
 
 #[allow(dead_code)]
@@ -66,6 +59,7 @@ where
     pub(crate) client: C,
     pub(crate) message_permits: u32,
     pub(crate) current_message_permits: AtomicU32,
+    pub(crate) batched_message_buffer: Mutex<Vec<Message<T>>>,
     pub(crate) plugins: Mutex<Vec<Box<dyn ConsumerPlugin<C, T> + Send + Sync>>>,
 }
 
@@ -74,12 +68,9 @@ where
     T: ConsumerDataTrait,
     C: PulsarClient,
 {
-    pub async fn next_message(&self) -> Result<Message<T>, NeutronError> {
-        self.check_and_flow().await?;
-
+    async fn next(&self) -> Result<Vec<Message<T>>, NeutronError> {
         let next_message = self.client.next_message().await?;
-
-        let message = match next_message {
+        let messages = match next_message {
             crate::message::Message::Single(crate::message::SingleMessage {
                 payload,
                 message_id,
@@ -93,14 +84,14 @@ where
                 });
 
                 #[cfg(not(feature = "json"))]
-                let message: Message<T> = Message::Single(SingleMessage {
+                let message: Message<T> = Message {
                     payload: payload
                         .try_into()
                         .map_err(|_| NeutronError::DeserializationFailed)?,
-                    message_id: message_id.clone(),
-                });
+                    ack: message_id.clone().into(),
+                };
 
-                message
+                vec![message]
             }
             crate::message::Message::Batch(batch) => {
                 let messages = batch
@@ -123,29 +114,89 @@ where
                     })
                     .collect::<Vec<_>>();
 
-                Message::Batch(BatchMessage {
-                    payloads: messages,
-                    message_id: batch.message_id.clone(),
-                })
+                messages
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, m)| Message {
+                        payload: m,
+                        ack: Ack {
+                            message_id: MessageIdData {
+                                batch_index: Some(i as i32),
+                                ..batch.message_id.clone()
+                            },
+                        },
+                    })
+                    .collect()
             }
         };
+        Ok(messages)
+    }
 
-        // increase message permit count
+    // get next batch from both batched messages and next if we need to.
+    pub async fn next_batch(&self, max_size: usize) -> Result<Vec<Message<T>>, NeutronError> {
+        self.check_and_flow().await?;
+        let mut buffer = self.batched_message_buffer.lock().await;
+        let mut messages = Vec::new();
+        while messages.len() < max_size {
+            match buffer.pop() {
+                Some(message) => messages.push(message),
+                None => break,
+            }
+        }
+
+        if messages.len() == max_size {
+            return Ok(messages);
+        }
+
+        let mut next_messages = self.next().await?;
+
+        let size_before = messages.len() as u32;
+
+        while messages.len() < max_size {
+            match next_messages.pop() {
+                Some(message) => messages.push(message),
+                None => break,
+            }
+        }
+
+        let message_permits = messages.len() as u32 - size_before;
+
+        self.current_message_permits
+            .fetch_add(message_permits, std::sync::atomic::Ordering::Relaxed);
+
+        Ok(messages)
+    }
+
+    pub async fn next_message(&self) -> Result<Message<T>, NeutronError> {
+        self.check_and_flow().await?;
+
+        let mut buffer = self.batched_message_buffer.lock().await;
+        if !buffer.is_empty() {
+            let message = buffer.remove(0);
+            return Ok(message);
+        }
+
+        let mut messages = self.next().await?;
+
+        let message = messages.remove(0);
+
+        buffer.extend(messages);
+
         self.current_message_permits
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         Ok(message)
     }
 
-    pub async fn ack(&self, message_id: &MessageIdData) -> Result<(), NeutronError> {
-        self.client.ack(message_id).await?.await?;
+    pub async fn ack(&self, ack: &Ack) -> Result<(), NeutronError> {
+        self.client.ack(&ack.message_id).await?.await?;
         Ok(())
     }
 
-    pub async fn ack_all(&self, message_ids: Vec<MessageIdData>) -> Result<(), NeutronError> {
-        let responses = message_ids
+    pub async fn ack_all(&self, acks: Vec<Ack>) -> Result<(), NeutronError> {
+        let responses = acks
             .iter()
-            .map(|m| self.client.ack(m))
+            .map(|ack| self.client.ack(&ack.message_id))
             .collect::<Vec<_>>();
 
         let (receipts, _errors): (Vec<_>, Vec<NeutronError>) = futures::future::join_all(responses)
@@ -323,6 +374,7 @@ where
             message_permits: 250,
             current_message_permits: AtomicU32::new(0),
             plugins: self.plugins.into(),
+            batched_message_buffer: Mutex::new(Vec::new()),
             client,
         };
 
@@ -385,6 +437,7 @@ mod tests {
             message_permits: 250,
             current_message_permits: std::sync::atomic::AtomicU32::new(0),
             plugins: futures::lock::Mutex::new(Vec::new()),
+            batched_message_buffer: futures::lock::Mutex::new(Vec::new()),
         };
 
         assert_eq!(consumer.consumer_name(), "test_client");
@@ -416,6 +469,7 @@ mod tests {
             message_permits: 250,
             current_message_permits: std::sync::atomic::AtomicU32::new(0),
             plugins: futures::lock::Mutex::new(Vec::new()),
+            batched_message_buffer: futures::lock::Mutex::new(Vec::new()),
         };
 
         consumer.connect().await.unwrap();
@@ -442,20 +496,23 @@ mod tests {
             message_permits: 250,
             current_message_permits: std::sync::atomic::AtomicU32::new(0),
             plugins: futures::lock::Mutex::new(Vec::new()),
+            batched_message_buffer: futures::lock::Mutex::new(Vec::new()),
         };
 
-        consumer.ack(&MessageIdData::new()).await.unwrap();
+        consumer.ack(&MessageIdData::new().into()).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_message_recieve() {
         let mut client = get_mock_client(None);
         client.expect_next_message().times(3).returning(|| {
-            Ok(crate::message::Message {
-                payload: vec![104, 101, 108, 108, 111, 95, 119, 111, 114, 108, 100],
-                message_id: MessageIdData::new(),
-                consumer_id: 0,
-            })
+            Ok(crate::message::Message::Single(
+                crate::message::SingleMessage {
+                    payload: vec![104, 101, 108, 108, 111, 95, 119, 111, 114, 108, 100],
+                    message_id: MessageIdData::new(),
+                    consumer_id: 0,
+                },
+            ))
         });
         client.expect_flow().times(1).return_once(|_| Ok(()));
         let consumer: Consumer<MockPulsarClient, Data> = Consumer {
@@ -467,6 +524,7 @@ mod tests {
             message_permits: 2,
             current_message_permits: std::sync::atomic::AtomicU32::new(0),
             plugins: futures::lock::Mutex::new(Vec::new()),
+            batched_message_buffer: futures::lock::Mutex::new(Vec::new()),
         };
 
         let message: Data = consumer.next_message().await.unwrap().payload;
