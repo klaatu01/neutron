@@ -1,0 +1,1041 @@
+<title>Rewiring Neutron</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+  :root{
+    --ground:#EDF2F5; --surface:#FFFFFF; --surface-2:#F5F9FB;
+    --ink:#0F1721; --muted:#54626F; --line:#D3DDE4; --line-soft:#E3EBF0;
+    --accent:#06697C; --accent-soft:#DEF0F4; --accent-ink:#04505E;
+    --hot:#A8321E; --warm:#8A5A08; --good:#1F6B41;
+    --display:"Archivo",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --body:"Source Serif 4",Georgia,"Times New Roman",serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --measure:68ch; --wide:1080px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ground:#0A1017; --surface:#121A23; --surface-2:#16202B;
+      --ink:#E2EAF1; --muted:#8B9BA9; --line:#243342; --line-soft:#1B2733;
+      --accent:#4CD4E8; --accent-soft:#0D2932; --accent-ink:#8AE4F2;
+      --hot:#F0836B; --warm:#E0AC55; --good:#66C48F;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#0A1017; --surface:#121A23; --surface-2:#16202B;
+    --ink:#E2EAF1; --muted:#8B9BA9; --line:#243342; --line-soft:#1B2733;
+    --accent:#4CD4E8; --accent-soft:#0D2932; --accent-ink:#8AE4F2;
+    --hot:#F0836B; --warm:#E0AC55; --good:#66C48F;
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:var(--body); font-size:17.5px; line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:var(--wide); margin:0 auto; padding:0 28px}
+  .col{max-width:var(--measure)}
+
+  /* ---------- masthead ---------- */
+  .mast{border-bottom:1px solid var(--line); background:var(--surface)}
+  .mast .wrap{padding-top:52px; padding-bottom:40px}
+  .eyebrow{
+    font-family:var(--mono); font-size:11px; font-weight:500;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--accent-ink);
+    display:flex; align-items:center; gap:14px; margin:0 0 22px;
+  }
+  .eyebrow svg{flex:none}
+  h1{
+    font-family:var(--display); font-weight:700; font-size:clamp(2.3rem,5.4vw,3.6rem);
+    line-height:1.02; letter-spacing:-.025em; margin:0 0 20px; text-wrap:balance;
+  }
+  .thesis{font-size:1.2rem; color:var(--muted); max-width:60ch; margin:0 0 28px}
+  .thesis strong{color:var(--ink); font-weight:600}
+  .meta{
+    font-family:var(--mono); font-size:11.5px; color:var(--muted);
+    display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:22px;
+    border-top:1px solid var(--line-soft);
+  }
+  .meta b{font-weight:500; color:var(--ink)}
+
+  /* ---------- sections ---------- */
+  section{padding:60px 0; border-bottom:1px solid var(--line-soft)}
+  section:last-of-type{border-bottom:0}
+  .sec-tag{
+    font-family:var(--mono); font-size:11px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 12px;
+  }
+  h2{
+    font-family:var(--display); font-weight:600; font-size:clamp(1.6rem,3.2vw,2.1rem);
+    line-height:1.14; letter-spacing:-.018em; margin:0 0 20px; text-wrap:balance;
+  }
+  h3{
+    font-family:var(--display); font-weight:600; font-size:1.16rem;
+    letter-spacing:-.01em; margin:38px 0 10px; text-wrap:balance;
+  }
+  p{margin:0 0 18px}
+  .lede{font-size:1.08rem; color:var(--muted)}
+  code{
+    font-family:var(--mono); font-size:.86em; background:var(--surface-2);
+    border:1px solid var(--line-soft); border-radius:3px; padding:.1em .35em;
+    color:var(--accent-ink); white-space:nowrap;
+  }
+  a{color:var(--accent-ink)}
+
+  /* ---------- pattern blocks ---------- */
+  .pat{
+    margin:34px 0; padding:26px 28px; background:var(--surface);
+    border:1px solid var(--line); border-radius:2px;
+    border-left:3px solid var(--accent);
+  }
+  .pat h3{margin:0 0 6px; font-size:1.24rem}
+  .pat .swap{
+    font-family:var(--mono); font-size:11.5px; color:var(--muted);
+    margin:0 0 16px; letter-spacing:.01em;
+  }
+  .pat .swap i{font-style:normal; color:var(--hot)}
+  .pat .swap b{font-weight:500; color:var(--good)}
+  .pat p:last-child{margin-bottom:0}
+
+  /* ---------- figures ---------- */
+  figure{
+    margin:36px 0; padding:24px; background:var(--surface);
+    border:1px solid var(--line); border-radius:2px; overflow-x:auto;
+  }
+  figure svg{display:block; max-width:100%; height:auto; margin:0 auto; color:var(--ink)}
+  figcaption{
+    font-family:var(--mono); font-size:11.5px; line-height:1.6; color:var(--muted);
+    margin-top:20px; padding-top:14px; border-top:1px solid var(--line-soft);
+  }
+  figcaption b{color:var(--ink); font-weight:500}
+  .box{fill:var(--surface); stroke:currentColor; stroke-width:1.25}
+  .box-2{fill:var(--surface-2); stroke:currentColor; stroke-width:1.25}
+  .box-dead{fill:none; stroke:var(--hot); stroke-width:1.25; stroke-dasharray:5 3}
+  .box-gh{fill:none; stroke:currentColor; stroke-width:1; stroke-dasharray:4 3; opacity:.5}
+  .box-hot{fill:var(--accent-soft); stroke:var(--accent); stroke-width:1.5}
+  .edge{stroke:currentColor; stroke-width:1.2; fill:none; opacity:.7}
+  .edge-hot{stroke:var(--accent); stroke-width:1.7; fill:none}
+  .edge-dim{stroke:currentColor; stroke-width:1; fill:none; opacity:.4; stroke-dasharray:4 3}
+  .edge-dead{stroke:var(--hot); stroke-width:1.4; fill:none; stroke-dasharray:5 4}
+  .t{font-family:var(--mono); font-size:12px; fill:currentColor}
+  .t-b{font-family:var(--mono); font-size:12px; font-weight:600; fill:currentColor}
+  .t-s{font-family:var(--mono); font-size:10.5px; fill:currentColor; opacity:.68}
+  .t-hot{font-family:var(--mono); font-size:10.5px; fill:var(--accent)}
+  .t-red{font-family:var(--mono); font-size:10.5px; fill:var(--hot)}
+  .t-ttl{font-family:var(--mono); font-size:11px; font-weight:600; letter-spacing:.1em; fill:currentColor; opacity:.6}
+
+  /* ---------- tables ---------- */
+  .tbl-wrap{overflow-x:auto; margin:28px 0}
+  table{
+    width:100%; border-collapse:collapse; font-family:var(--mono);
+    font-size:12.5px; line-height:1.5; background:var(--surface);
+    border:1px solid var(--line);
+  }
+  th{
+    text-align:left; font-weight:600; font-size:10.5px; letter-spacing:.11em;
+    text-transform:uppercase; color:var(--muted); padding:12px 14px;
+    border-bottom:1px solid var(--line); white-space:nowrap;
+  }
+  td{padding:11px 14px; border-bottom:1px solid var(--line-soft); vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  td.k{color:var(--ink); font-weight:500; white-space:nowrap}
+  td.no{color:var(--hot)}
+  td.yes{color:var(--good)}
+
+  /* ---------- rules list ---------- */
+  ol.rules{list-style:none; counter-reset:r; padding:0; margin:28px 0}
+  ol.rules li{
+    counter-increment:r; position:relative; padding:0 0 0 46px; margin:0 0 22px;
+  }
+  ol.rules li::before{
+    content:counter(r,decimal-leading-zero); position:absolute; left:0; top:2px;
+    font-family:var(--mono); font-size:11px; font-weight:600; color:var(--accent);
+    border:1px solid var(--accent); border-radius:2px; padding:2px 5px;
+  }
+  ol.rules b{font-family:var(--display); font-weight:600; font-size:1.02rem}
+
+  /* ---------- staged plan ---------- */
+  .stage{
+    display:grid; grid-template-columns:88px 1fr; gap:22px;
+    padding:20px 0; border-top:1px solid var(--line-soft);
+  }
+  .stage:last-child{border-bottom:1px solid var(--line-soft)}
+  .stage .n{
+    font-family:var(--mono); font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--accent); padding-top:3px;
+  }
+  .stage h4{font-family:var(--display); font-weight:600; font-size:1.02rem; margin:0 0 6px}
+  .stage p{margin:0; font-size:.96rem; color:var(--muted)}
+  @media (max-width:640px){
+    .stage{grid-template-columns:1fr; gap:6px}
+    body{font-size:16.5px}
+    .wrap{padding:0 20px}
+  }
+
+  .close{
+    background:var(--surface); border:1px solid var(--line);
+    border-radius:2px; padding:28px; margin:40px 0 0;
+  }
+  .close p:last-child{margin-bottom:0}
+</style>
+
+<header class="mast">
+  <div class="wrap">
+    <p class="eyebrow">
+      <svg width="86" height="14" viewBox="0 0 86 14" role="img" aria-label="Pulse train">
+        <g fill="currentColor">
+          <rect x="0"  y="9"  width="1.6" height="5"></rect>
+          <rect x="6"  y="11" width="1.6" height="3"></rect>
+          <rect x="12" y="1"  width="1.6" height="13"></rect>
+          <rect x="18" y="10" width="1.6" height="4"></rect>
+          <rect x="24" y="12" width="1.6" height="2"></rect>
+          <rect x="30" y="8"  width="1.6" height="6"></rect>
+          <rect x="36" y="3"  width="1.6" height="11"></rect>
+          <rect x="42" y="11" width="1.6" height="3"></rect>
+          <rect x="48" y="9"  width="1.6" height="5"></rect>
+          <rect x="54" y="12" width="1.6" height="2"></rect>
+          <rect x="60" y="2"  width="1.6" height="12"></rect>
+          <rect x="66" y="10" width="1.6" height="4"></rect>
+          <rect x="72" y="11" width="1.6" height="3"></rect>
+          <rect x="78" y="7"  width="1.6" height="7"></rect>
+        </g>
+      </svg>
+      Architecture review
+    </p>
+    <h1>Rewiring Neutron</h1>
+    <p class="thesis">
+      Every message in the client — from every producer, to every consumer, across
+      every broker — passes through <strong>one task</strong>. That single decision sets
+      the throughput ceiling, the latency floor, the failure domain, and the reason
+      reconnection was never written. Here is the shape high-throughput clients take instead.
+    </p>
+    <div class="meta">
+      <span><b>Repo</b> klaatu01/neutron</span>
+      <span><b>Reviewed at</b> 95ed1ee</span>
+      <span><b>Scope</b> message passing &amp; processing layers</span>
+      <span><b>3,794</b> lines of Rust</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ============ 1. THE SHAPE YOU HAVE ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Current shape</p>
+    <h2>One task in the middle of everything</h2>
+    <p class="lede">
+      The architecture is a <em>central dispatcher</em>: a single <code>tokio::select!</code>
+      loop in <code>Pulsar::start_pulsar</code> that relays between every client and every
+      broker connection. It is a genuinely attractive pattern, and it is worth being
+      precise about why before replacing it.
+    </p>
+    <p>
+      A hub gives you one place where ordering is defined, and it makes shared state safe
+      for free — <code>client → broker</code> mappings can be plain fields because exactly
+      one task ever touches them. For a first working client that is the right call. You got
+      a correct protocol implementation out of it, which is the hard part.
+    </p>
+    <p>
+      What it costs is everything that scales. The hub is a serialization point, so
+      throughput is capped at one core no matter how many runtime threads you give it.
+      It is a single failure domain, so one <code>Err</code> from one client ends the loop
+      and every producer and consumer in the process with it. And it adds a hop that buys
+      nothing: by the time a producer's payload reaches the hub, the destination connection
+      was already known at the source.
+    </p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 880 396" role="img" aria-label="Current topology: three clients funnel through one central dispatch task, which then fans out to two broker connections">
+      <defs>
+        <marker id="a1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="currentColor"></path>
+        </marker>
+      </defs>
+
+      <text class="t-ttl" x="30" y="24">CLIENT TASKS</text>
+      <text class="t-ttl" x="336" y="24">DISPATCH</text>
+      <text class="t-ttl" x="686" y="24">CONNECTION TASKS</text>
+
+      <rect class="box" x="30"  y="58"  width="152" height="54" rx="2"></rect>
+      <text class="t"   x="46"  y="80">Producer A</text>
+      <text class="t-s" x="46"  y="97">client_id 0</text>
+
+      <rect class="box" x="30"  y="152" width="152" height="54" rx="2"></rect>
+      <text class="t"   x="46"  y="174">Consumer B</text>
+      <text class="t-s" x="46"  y="191">client_id 1</text>
+
+      <rect class="box" x="30"  y="246" width="152" height="54" rx="2"></rect>
+      <text class="t"   x="46"  y="268">Consumer C</text>
+      <text class="t-s" x="46"  y="285">client_id 2</text>
+
+      <line class="edge" x1="182" y1="85"  x2="330" y2="130" marker-end="url(#a1)"></line>
+      <line class="edge" x1="182" y1="179" x2="330" y2="188" marker-end="url(#a1)"></line>
+      <line class="edge" x1="182" y1="273" x2="330" y2="246" marker-end="url(#a1)"></line>
+      <text class="t-s" x="196" y="82">unbounded</text>
+      <text class="t-s" x="196" y="176">unbounded</text>
+      <text class="t-s" x="196" y="270">unbounded</text>
+
+      <rect class="box-hot" x="336" y="58" width="196" height="284" rx="2"></rect>
+      <text class="t-b"  x="356" y="90">select! {</text>
+      <text class="t"    x="368" y="126">clients.next()</text>
+      <text class="t-hot" x="368" y="143">select_all over N</text>
+      <text class="t"    x="368" y="178">conns.next()</text>
+      <text class="t-hot" x="368" y="195">select_all over M</text>
+      <text class="t"    x="368" y="230">registrations</text>
+      <text class="t-b"  x="356" y="266">}</text>
+      <line class="edge-dim" x1="356" y1="288" x2="512" y2="288"></line>
+      <text class="t-s"  x="356" y="308">holds 2 mutex guards</text>
+      <text class="t-s"  x="356" y="325">across the select</text>
+
+      <line class="edge" x1="532" y1="130" x2="682" y2="118" marker-end="url(#a1)"></line>
+      <line class="edge" x1="532" y1="246" x2="682" y2="258" marker-end="url(#a1)"></line>
+
+      <rect class="box" x="688" y="86"  width="162" height="62" rx="2"></rect>
+      <text class="t"   x="704" y="110">Framed&lt;TcpStream&gt;</text>
+      <text class="t-s" x="704" y="128">broker-1</text>
+
+      <rect class="box" x="688" y="226" width="162" height="62" rx="2"></rect>
+      <text class="t"   x="704" y="250">Framed&lt;TcpStream&gt;</text>
+      <text class="t-s" x="704" y="268">broker-2</text>
+
+      <line class="edge-dim" x1="30" y1="366" x2="850" y2="366"></line>
+      <text class="t-s" x="30" y="386">per message: 3 payload copies &#183; 2 queue hops &#183; N+M boxed futures allocated, polled, discarded</text>
+    </svg>
+    <figcaption>
+      <b>Fig 1 — The funnel.</b> Every client and every connection meets in one task.
+      The three annotated costs are per message, not per second: the payload is cloned at
+      each relay (<code>client_manager.rs:82</code>, <code>pulsar.rs:176</code>,
+      <code>connection.rs:131</code>), and each loop turn heap-allocates a boxed future for
+      every client and every connection just to poll them and drop all but one.
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============ 2. THE PATTERNS ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Patterns</p>
+    <h2>Five moves that carry the throughput</h2>
+    <p class="lede">
+      These are the load-bearing patterns in high-throughput async Rust services. None are
+      exotic; all of them are things the current design either inverts or skips.
+    </p>
+  </div>
+
+  <div class="col">
+    <div class="pat">
+      <h3>Actor per resource, split by direction</h3>
+      <p class="swap"><i>one task for the system</i> &rarr; <b>two tasks per connection</b></p>
+      <p>
+        The unit of concurrency should be the thing that can independently block — a socket —
+        not the system as a whole. Split each <code>Framed</code> into its
+        <code>SplitSink</code> and <code>SplitStream</code> and run a <em>reader</em> task and
+        a <em>writer</em> task over the halves.
+      </p>
+      <p>
+        Two tasks rather than one <code>select!</code> is the part people skip, and it matters
+        for throughput: a slow flush can no longer delay decoding, neither direction can starve
+        the other on readiness, and you drop the whole class of cancellation-safety hazards
+        that come from awaiting composite futures in a loop. N connections then genuinely use
+        N cores, because nothing they share is on the hot path.
+      </p>
+    </div>
+
+    <div class="pat">
+      <h3>Coalesce at the syscall boundary</h3>
+      <p class="swap"><i>one flush per message</i> &rarr; <b>one flush per batch</b></p>
+      <p>
+        This is usually the single largest throughput win available in a protocol client, and
+        it is invisible in the type system. A writer task that owns the sink should drain its
+        queue with <code>recv_many()</code>, <code>feed()</code> every frame into the encoder,
+        and <code>flush()</code> exactly once for the batch.
+      </p>
+      <p>
+        Under load the batch size grows on its own — that is the point. Cost per message falls
+        as offered load rises, which is precisely the curve you want and the opposite of what
+        a per-message <code>send().await</code> gives you. Note this is a different mechanism
+        from protocol-level producer batching, which the codebase already has; you want both,
+        and they compose.
+      </p>
+    </div>
+
+    <div class="pat">
+      <h3>Route by lookup, not by traversal</h3>
+      <p class="swap"><i>poll N receivers</i> &rarr; <b>index one map</b></p>
+      <p>
+        <code>select_all</code> over a <code>Vec</code> of receivers is O(N) allocation and
+        O(N) polling per message, and it polls in index order, so early clients starve later
+        ones under sustained load. It is the wrong shape twice over.
+      </p>
+      <p>
+        Both directions have a cheaper form. Outbound, let the <em>senders</em> converge:
+        that is what a multi-producer channel is for — N senders, one bounded queue, one
+        receiver. Inbound, don't converge at all: the frame already carries its
+        <code>consumer_id</code> or <code>producer_id</code>, so the reader task can index a
+        concurrent map and hand the message straight to that client's inbox. O(1), no
+        intermediary, no shared cursor.
+      </p>
+    </div>
+
+    <div class="pat">
+      <h3>One buffer, many owners</h3>
+      <p class="swap"><i><code>Vec&lt;u8&gt;</code> cloned per hop</i> &rarr; <b><code>Bytes</code> refcounted</b></p>
+      <p>
+        Payloads are <code>Vec&lt;u8&gt;</code> and get cloned at every relay — three full
+        copies inbound and three outbound. At 1 MB messages that is 6 MB of <code>memcpy</code>
+        per message round trip, all of it pure overhead.
+      </p>
+      <p>
+        <code>bytes</code> is already a dependency. Decode with
+        <code>BytesMut::split_to(n).freeze()</code> so the payload is never copied out of the
+        read buffer, and make <code>Bytes</code> the payload currency through every layer.
+        Every subsequent hop becomes an atomic increment. In a broker client this is not an
+        optimization, it is the baseline the rest of the design assumes.
+      </p>
+    </div>
+
+    <div class="pat">
+      <h3>Bounded queues are the flow control</h3>
+      <p class="swap"><i><code>async_channel::unbounded</code></i> &rarr; <b>bounded, with a stated policy</b></p>
+      <p>
+        Every channel in the system is unbounded (<code>engine.rs:28-29</code>). An unbounded
+        queue does not remove backpressure; it relocates it to the allocator, where it
+        surfaces as an OOM instead of a slowdown. It also destroys tail latency, because
+        queue depth — and therefore time-in-queue — has no limit.
+      </p>
+      <p>
+        Bound every queue and state its policy per direction. Outbound, a bounded
+        <code>send().await</code> propagates pressure to the application, which is exactly
+        what you want. Inbound, the capacity must be <em>the same number</em> as the
+        flow-control credit you grant the broker — the most commonly missed coupling in
+        message-client design. If credit exceeds capacity the queue overflows; if capacity
+        exceeds credit you stall below your configured rate. Tie them together and issue
+        new credit as the application drains.
+      </p>
+    </div>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 880 300" role="img" aria-label="Comparison: polling N receivers per message versus N senders converging into one bounded queue">
+      <defs>
+        <marker id="a2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="currentColor"></path>
+        </marker>
+        <marker id="a2h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <text class="t-ttl" x="24" y="22">TRAVERSAL &#183; TODAY</text>
+      <rect class="box-gh" x="24" y="36" width="392" height="234" rx="2"></rect>
+
+      <rect class="box" x="48" y="66"  width="96" height="34" rx="2"></rect>
+      <text class="t-s"  x="64" y="88">queue 0</text>
+      <rect class="box" x="48" y="116" width="96" height="34" rx="2"></rect>
+      <text class="t-s"  x="64" y="138">queue 1</text>
+      <rect class="box" x="48" y="166" width="96" height="34" rx="2"></rect>
+      <text class="t-s"  x="64" y="188">queue 2</text>
+      <rect class="box" x="48" y="216" width="96" height="34" rx="2"></rect>
+      <text class="t-s"  x="64" y="238">queue N</text>
+
+      <line class="edge" x1="284" y1="158" x2="150" y2="83"  marker-end="url(#a2)"></line>
+      <line class="edge" x1="284" y1="158" x2="150" y2="133" marker-end="url(#a2)"></line>
+      <line class="edge" x1="284" y1="158" x2="150" y2="183" marker-end="url(#a2)"></line>
+      <line class="edge" x1="284" y1="158" x2="150" y2="233" marker-end="url(#a2)"></line>
+
+      <rect class="box-2" x="286" y="122" width="106" height="72" rx="2"></rect>
+      <text class="t"    x="300" y="150">select_all</text>
+      <text class="t-s"  x="300" y="170">poll all N,</text>
+      <text class="t-s"  x="300" y="184">keep one</text>
+
+      <text class="t-red" x="48" y="264">N allocations + N polls per message &#183; index-order bias</text>
+
+      <text class="t-ttl" x="464" y="22">CONVERGENCE &#183; PROPOSED</text>
+      <rect class="box-gh" x="464" y="36" width="392" height="234" rx="2"></rect>
+
+      <rect class="box" x="488" y="66"  width="96" height="34" rx="2"></rect>
+      <text class="t-s"  x="504" y="88">sender 0</text>
+      <rect class="box" x="488" y="116" width="96" height="34" rx="2"></rect>
+      <text class="t-s"  x="504" y="138">sender 1</text>
+      <rect class="box" x="488" y="166" width="96" height="34" rx="2"></rect>
+      <text class="t-s"  x="504" y="188">sender 2</text>
+      <rect class="box" x="488" y="216" width="96" height="34" rx="2"></rect>
+      <text class="t-s"  x="504" y="238">sender N</text>
+
+      <line class="edge-hot" x1="584" y1="83"  x2="716" y2="146" marker-end="url(#a2h)"></line>
+      <line class="edge-hot" x1="584" y1="133" x2="716" y2="152" marker-end="url(#a2h)"></line>
+      <line class="edge-hot" x1="584" y1="183" x2="716" y2="164" marker-end="url(#a2h)"></line>
+      <line class="edge-hot" x1="584" y1="233" x2="716" y2="170" marker-end="url(#a2h)"></line>
+
+      <rect class="box-hot" x="718" y="122" width="112" height="72" rx="2"></rect>
+      <text class="t"    x="732" y="150">mpsc(cap)</text>
+      <text class="t-s"  x="732" y="170">recv_many</text>
+      <text class="t-s"  x="732" y="184">&rarr; one flush</text>
+
+      <text class="t-hot" x="488" y="264">0 allocations &#183; 1 wake &#183; fair queue &#183; batches under load</text>
+    </svg>
+    <figcaption>
+      <b>Fig 2 — Who does the work of choosing.</b> On the left the receiver asks every
+      queue whether it has anything; the cost of finding one message scales with the number
+      of clients. On the right the senders put their work in one place and the receiver takes
+      as much as is there. The right-hand shape gets <em>cheaper per message</em> as load rises.
+    </figcaption>
+  </figure>
+
+  <figure>
+    <svg viewBox="0 0 880 212" role="img" aria-label="Comparison: one write and flush syscall per message versus a coalescing writer that flushes once per drained batch">
+      <defs>
+        <marker id="a3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="currentColor"></path>
+        </marker>
+        <marker id="a3h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <text class="t-ttl" x="24" y="22">TODAY</text>
+      <text class="t-s"   x="24" y="112">4 msgs</text>
+      <g>
+        <rect class="box" x="86" y="46"  width="30" height="22" rx="2"></rect>
+        <rect class="box" x="86" y="76"  width="30" height="22" rx="2"></rect>
+        <rect class="box" x="86" y="106" width="30" height="22" rx="2"></rect>
+        <rect class="box" x="86" y="136" width="30" height="22" rx="2"></rect>
+      </g>
+      <line class="edge" x1="120" y1="57"  x2="286" y2="57"  marker-end="url(#a3)"></line>
+      <line class="edge" x1="120" y1="87"  x2="286" y2="87"  marker-end="url(#a3)"></line>
+      <line class="edge" x1="120" y1="117" x2="286" y2="117" marker-end="url(#a3)"></line>
+      <line class="edge" x1="120" y1="147" x2="286" y2="147" marker-end="url(#a3)"></line>
+      <text class="t-s" x="150" y="52">send + flush</text>
+      <text class="t-s" x="150" y="82">send + flush</text>
+      <text class="t-s" x="150" y="112">send + flush</text>
+      <text class="t-s" x="150" y="142">send + flush</text>
+      <rect class="box-2" x="288" y="46" width="86" height="112" rx="2"></rect>
+      <text class="t"   x="302" y="98">socket</text>
+      <text class="t-red" x="86" y="186">4 write syscalls</text>
+
+      <line class="edge-dim" x1="424" y1="30" x2="424" y2="210"></line>
+
+      <text class="t-ttl" x="464" y="22">PROPOSED</text>
+      <text class="t-s"   x="464" y="112">4 msgs</text>
+      <g>
+        <rect class="box" x="526" y="46"  width="30" height="22" rx="2"></rect>
+        <rect class="box" x="526" y="76"  width="30" height="22" rx="2"></rect>
+        <rect class="box" x="526" y="106" width="30" height="22" rx="2"></rect>
+        <rect class="box" x="526" y="136" width="30" height="22" rx="2"></rect>
+      </g>
+      <line class="edge-hot" x1="560" y1="57"  x2="638" y2="92"  marker-end="url(#a3h)"></line>
+      <line class="edge-hot" x1="560" y1="87"  x2="638" y2="98"  marker-end="url(#a3h)"></line>
+      <line class="edge-hot" x1="560" y1="117" x2="638" y2="110" marker-end="url(#a3h)"></line>
+      <line class="edge-hot" x1="560" y1="147" x2="638" y2="116" marker-end="url(#a3h)"></line>
+
+      <rect class="box-hot" x="640" y="72" width="106" height="64" rx="2"></rect>
+      <text class="t"   x="654" y="96">recv_many</text>
+      <text class="t-s" x="654" y="116">feed &#215; 4</text>
+
+      <line class="edge-hot" x1="746" y1="104" x2="796" y2="104" marker-end="url(#a3h)"></line>
+      <text class="t-hot" x="748" y="94">flush</text>
+      <rect class="box-2" x="798" y="72" width="58" height="64" rx="2"></rect>
+      <text class="t"   x="810" y="108">socket</text>
+      <text class="t-hot" x="526" y="186">1 write syscall &#183; batch grows with load</text>
+    </svg>
+    <figcaption>
+      <b>Fig 3 — Amortizing the syscall.</b> The writer task owns the sink, so it is the only
+      place that decides when to flush. Draining whatever has accumulated and flushing once
+      converts per-message syscall cost into per-batch cost, and the batch fills itself as
+      offered load rises.
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============ 3. CORRELATION ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Multiplexing</p>
+    <h2>The in-flight table</h2>
+    <p class="lede">
+      Any client that multiplexes many logical streams over one socket needs the same
+      structure: a table of requests awaiting a response. HTTP/2 keys it on stream id,
+      AMQP on channel, JDBC on statement handle. It is worth getting the shape exactly right,
+      because everything about reliability under load flows through it.
+    </p>
+    <p>
+      Neutron's <code>CommandResolver</code> keys this table on a string derived from the
+      <em>command type</em> — <code>"ACK"</code>, <code>"SUBSCRIBE"</code>,
+      <code>format!("SEND:{}", sequence_id)</code> — in one map shared by every client in the
+      process. That has a throughput cost (an allocation and a string hash on every publish,
+      on the hot path) and a correctness cost that matters more: type names are not unique
+      per request, so concurrent requests of the same kind collide in the map.
+    </p>
+    <p>The pattern has three properties, and each one is doing real work:</p>
+    <ol class="rules">
+      <li>
+        <b>Key on an identifier the protocol echoes back.</b> The wire format already carries
+        <code>request_id</code> for exactly this purpose. A <code>u64</code> key costs no
+        allocation and no formatting, and it is unique per request by construction rather
+        than by convention.
+      </li>
+      <li>
+        <b>Scope the table to the connection.</b> Request ids are only unique within a
+        connection, and a shared process-wide table makes every client contend on one lock
+        for a structure that has no reason to be shared.
+      </li>
+      <li>
+        <b>Give every entry an owner that must complete it.</b> An entry leaves the table on
+        response, on deadline, or on connection teardown — never any other way. Miss the
+        second and a lost response hangs a caller forever; miss the third and it hangs them
+        until process exit. Neutron defines <code>OperationTimeout</code> in its error enum
+        and never constructs it, and nothing sweeps the map, so entries only ever leave on
+        a successful match.
+      </li>
+    </ol>
+    <p>
+      Concretely: <code>HashMap&lt;u64, Pending&gt;</code> behind a short-lived lock, where
+      <code>Pending</code> holds the <code>oneshot::Sender</code>, a deadline, and enough
+      context to write a useful error. One <code>tokio::time::interval</code> per connection
+      sweeps expiries. On teardown the supervisor drains the whole table and completes every
+      waiter with a disconnect error. No hangs, no leak, no shared lock.
+    </p>
+  </div>
+</section>
+
+<!-- ============ 4. RELIABILITY / INDIRECTION ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Reliability</p>
+    <h2>Reconnection is a topology property</h2>
+    <p class="lede">
+      Automatic reconnection is the one unchecked box in the README. It is worth saying
+      plainly: it isn't missing because nobody wrote it. The current topology excludes it.
+    </p>
+    <p>
+      <code>EngineConnection::pair()</code> bonds a client to a connection by handing each
+      side two channel endpoints. That is a point-to-point binding — the client's only route
+      to the broker <em>is</em> that pair of channels. When the connection task exits the
+      endpoints close, and there is nowhere to put a replacement, because the client holds a
+      wire rather than an address.
+    </p>
+    <p>
+      The pattern that fixes it is indirection: <strong>a client should hold a name, not a
+      wire.</strong> Give it a key into a registry, or an <code>ArcSwap&lt;ConnectionHandle&gt;</code>,
+      and a supervisor can swap a fresh connection in behind that name while the client is
+      mid-flight. This generalizes past this codebase — anything you want to be able to
+      restart at runtime has to be addressed indirectly.
+    </p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 880 250" role="img" aria-label="Comparison: a bonded channel pair dies with its connection task, whereas a swappable handle lets a supervisor replace the connection underneath the client">
+      <defs>
+        <marker id="a4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="currentColor"></path>
+        </marker>
+        <marker id="a4h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--accent)"></path>
+        </marker>
+        <marker id="a4d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="currentColor" opacity=".45"></path>
+        </marker>
+      </defs>
+
+      <text class="t-ttl" x="24" y="22">BONDED PAIR &#183; TODAY</text>
+      <rect class="box-gh" x="24" y="36" width="392" height="192" rx="2"></rect>
+
+      <rect class="box" x="48" y="94" width="108" height="46" rx="2"></rect>
+      <text class="t"   x="64" y="122">Client</text>
+
+      <line class="edge" x1="156" y1="108" x2="244" y2="108" marker-end="url(#a4)"></line>
+      <line class="edge" x1="244" y1="130" x2="156" y2="130" marker-end="url(#a4)"></line>
+      <text class="t-s" x="166" y="100">channel pair</text>
+
+      <line class="edge-dead" x1="192" y1="100" x2="204" y2="138"></line>
+      <line class="edge-dead" x1="204" y1="100" x2="216" y2="138"></line>
+
+      <rect class="box-dead" x="248" y="94" width="120" height="46" rx="2"></rect>
+      <text class="t"     x="262" y="116">Conn task</text>
+      <text class="t-red" x="262" y="133">exited</text>
+
+      <text class="t-red" x="48" y="180">endpoints close and there is nowhere to put</text>
+      <text class="t-red" x="48" y="197">a replacement &#8212; the client holds a wire,</text>
+      <text class="t-red" x="48" y="214">not an address</text>
+
+      <text class="t-ttl" x="464" y="22">SWAPPABLE HANDLE &#183; PROPOSED</text>
+      <rect class="box-gh" x="464" y="36" width="392" height="192" rx="2"></rect>
+
+      <rect class="box" x="488" y="94" width="104" height="46" rx="2"></rect>
+      <text class="t"   x="504" y="122">Client</text>
+
+      <line class="edge-hot" x1="592" y1="117" x2="656" y2="117" marker-end="url(#a4h)"></line>
+      <text class="t-s" x="600" y="108">load()</text>
+
+      <rect class="box-hot" x="658" y="94" width="96" height="46" rx="2"></rect>
+      <text class="t"   x="672" y="114">ArcSwap</text>
+      <text class="t-s" x="672" y="132">handle</text>
+
+      <line class="edge-dim" x1="754" y1="108" x2="788" y2="82"  marker-end="url(#a4d)"></line>
+      <line class="edge-hot" x1="754" y1="128" x2="788" y2="156" marker-end="url(#a4h)"></line>
+
+      <rect class="box-dead" x="790" y="56" width="58" height="38" rx="2"></rect>
+      <text class="t-s"      x="808" y="80">v1</text>
+      <text class="t-red"    x="790" y="110">closed</text>
+
+      <rect class="box-hot" x="790" y="140" width="58" height="38" rx="2"></rect>
+      <text class="t-s"     x="808" y="164">v2</text>
+
+      <text class="t-hot" x="488" y="180">supervisor drains the in-flight table, replays</text>
+      <text class="t-hot" x="488" y="197">session state, then publishes v2 &#8212; the client</text>
+      <text class="t-hot" x="488" y="214">follows without knowing it reconnected</text>
+    </svg>
+    <figcaption>
+      <b>Fig 4 &#8212; Why the client can't currently recover.</b> The only structural difference
+      is one level of indirection, and it is the difference between a connection failure
+      being terminal and being a hiccup. Anything you want to restart at runtime has to be
+      addressed by name rather than held directly.
+    </figcaption>
+  </figure>
+
+  <div class="col">
+    <h3>Supervision, not <code>spawn</code> and hope</h3>
+    <p>
+      Long-lived tasks here are spawned detached, so when one exits nobody observes it. Give
+      every long-lived task a parent that holds its <code>JoinHandle</code>, classifies the
+      exit, applies jittered exponential backoff, and restarts it. Pair that with a
+      <code>CancellationToken</code> so shutdown propagates, and a <code>TaskTracker</code>
+      or <code>JoinSet</code> so shutdown can be awaited rather than assumed.
+    </p>
+    <p>
+      The retry decision belongs in the error type, not in each call site. A
+      <code>fn retryability(&amp;self) -&gt; Retryability</code> returning
+      <em>transient</em>, <em>permanent</em>, or <em>fatal</em> lets one backoff loop serve
+      every path, and it stops the current situation where <code>ChannelTerminated</code>
+      means both "the broker went away" and "your waiter was evicted" — two conditions with
+      opposite correct responses.
+    </p>
+  </div>
+</section>
+
+<!-- ============ 5. TARGET ARCHITECTURE ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Proposed</p>
+    <h2>The target shape</h2>
+    <p class="lede">
+      Put the five patterns together and the hub disappears. What replaces it is not another
+      task — it is a shared table that clients and readers index directly. Nothing sits
+      between a producer and its socket.
+    </p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 880 524" role="img" aria-label="Proposed topology: clients exchange messages directly with per-broker reader and writer tasks, consulting a shared registry that sits outside the message path">
+      <defs>
+        <marker id="a5" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="currentColor"></path>
+        </marker>
+        <marker id="a5h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <text class="t-ttl" x="24"  y="22">CLIENTS</text>
+      <text class="t-ttl" x="560" y="22">CONNECTION ACTOR &#183; ONE PER BROKER</text>
+
+      <rect class="box" x="24" y="64"  width="150" height="52" rx="2"></rect>
+      <text class="t"   x="40" y="86">Producer A</text>
+      <text class="t-s" x="40" y="103">ArcSwap&lt;Conn&gt;</text>
+
+      <rect class="box" x="24" y="140" width="150" height="52" rx="2"></rect>
+      <text class="t"   x="40" y="162">Consumer B</text>
+      <text class="t-s" x="40" y="179">inbox(cap 500)</text>
+
+      <rect class="box" x="24" y="216" width="150" height="52" rx="2"></rect>
+      <text class="t"   x="40" y="238">Consumer C</text>
+      <text class="t-s" x="40" y="255">inbox(cap 500)</text>
+
+      <rect class="box-gh" x="558" y="44" width="298" height="258" rx="2"></rect>
+      <text class="t-b" x="576" y="70">Supervisor</text>
+      <text class="t-s" x="576" y="88">connect &#183; backoff &#183; replay session</text>
+
+      <rect class="box-hot" x="578" y="104" width="222" height="60" rx="2"></rect>
+      <text class="t"   x="592" y="126">Writer task</text>
+      <text class="t-s" x="592" y="146">recv_many &rarr; feed &#215; n &rarr; flush &#215; 1</text>
+
+      <rect class="box-hot" x="578" y="180" width="222" height="60" rx="2"></rect>
+      <text class="t"   x="592" y="202">Reader task</text>
+      <text class="t-s" x="592" y="222">decode &rarr; Bytes &rarr; route by id</text>
+
+      <rect class="box-2" x="578" y="252" width="222" height="40" rx="2"></rect>
+      <text class="t-s" x="592" y="277">in-flight: u64 &rarr; (oneshot, deadline)</text>
+
+      <rect class="box-2" x="812" y="104" width="28" height="136" rx="2"></rect>
+      <text class="t-s" x="826" y="172" text-anchor="middle" transform="rotate(-90 826 172)">socket</text>
+      <line class="edge" x1="800" y1="130" x2="810" y2="130" marker-end="url(#a5)"></line>
+      <line class="edge" x1="810" y1="214" x2="800" y2="214" marker-end="url(#a5)"></line>
+
+      <line class="edge-hot" x1="176" y1="84"  x2="574" y2="124" marker-end="url(#a5h)"></line>
+      <text class="t-hot" x="200" y="76">publish &#183; bounded send().await, no intermediary</text>
+
+      <line class="edge-hot" x1="574" y1="202" x2="176" y2="160" marker-end="url(#a5h)"></line>
+      <line class="edge-hot" x1="574" y1="214" x2="176" y2="240" marker-end="url(#a5h)"></line>
+      <text class="t-hot" x="200" y="300">deliver &#183; O(1) route to the owning client's inbox</text>
+
+      <rect class="box-gh" x="24" y="356" width="832" height="104" rx="2"></rect>
+      <text class="t-b" x="44" y="384">Registry</text>
+      <text class="t-s" x="44" y="404">shared, read-mostly, sharded</text>
+      <text class="t-s" x="44" y="424">not a task &#183; no queue &#183; no hop</text>
+
+      <line class="edge-dim" x1="300" y1="366" x2="300" y2="450"></line>
+      <text class="t-s" x="324" y="392">clients</text>
+      <text class="t-s" x="324" y="412">client_id &rarr; inbox</text>
+
+      <line class="edge-dim" x1="520" y1="366" x2="520" y2="450"></line>
+      <text class="t-s" x="544" y="392">connections</text>
+      <text class="t-s" x="544" y="412">broker &rarr; handle</text>
+
+      <line class="edge-dim" x1="700" y1="366" x2="700" y2="450"></line>
+      <text class="t-s" x="724" y="392">topics</text>
+      <text class="t-s" x="724" y="412">topic &rarr; broker</text>
+
+      <line class="edge-dim" x1="100" y1="356" x2="100" y2="274" marker-end="url(#a5)"></line>
+      <text class="t-s" x="108" y="326">lookup</text>
+      <line class="edge-dim" x1="640" y1="356" x2="640" y2="308" marker-end="url(#a5)"></line>
+      <text class="t-s" x="648" y="336">lookup</text>
+
+      <line class="edge-dim" x1="24" y1="484" x2="856" y2="484"></line>
+      <text class="t-s" x="24" y="506">per message: 0 payload copies &#183; 1 queue hop &#183; 1 map lookup &#183; flush amortized across the batch</text>
+    </svg>
+    <figcaption>
+      <b>Fig 5 &#8212; Target topology.</b> The registry sits below the message path, not in it:
+      dashed edges are lookups, solid edges are the only places a message actually moves.
+      Compare with Fig 1 &#8212; the hop count halves, the copies go to zero, and each connection
+      actor is an independent failure domain a supervisor can restart without touching the others.
+    </figcaption>
+  </figure>
+
+  <div class="col">
+    <h3>What each layer owns</h3>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>Layer</th><th>Owns</th><th>Concurrency</th><th>Replaces</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="k">Writer task</td>
+          <td>the <code>SplitSink</code>, the outbound queue</td>
+          <td>one per connection</td>
+          <td>the send half of <code>start_connection</code></td>
+        </tr>
+        <tr>
+          <td class="k">Reader task</td>
+          <td>the <code>SplitStream</code>, decode, routing</td>
+          <td>one per connection</td>
+          <td>the recv half + the whole dispatch loop</td>
+        </tr>
+        <tr>
+          <td class="k">In-flight table</td>
+          <td>pending <code>oneshot</code>s, deadlines</td>
+          <td>one per connection, short lock</td>
+          <td><code>CommandResolver</code> &#215; 2</td>
+        </tr>
+        <tr>
+          <td class="k">Registry</td>
+          <td>id &rarr; inbox, broker &rarr; handle, topic cache</td>
+          <td>shared, read-mostly, sharded</td>
+          <td><code>ClientManager</code> + <code>ConnectionManager</code></td>
+        </tr>
+        <tr>
+          <td class="k">Supervisor</td>
+          <td>connection lifecycle, backoff, session replay</td>
+          <td>one per broker</td>
+          <td>nothing — this is new</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============ 6. PRIMITIVES ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Reference</p>
+    <h2>Choosing the primitive</h2>
+    <p class="lede">
+      Most of the design pressure in a service like this resolves into picking the right
+      channel and the right sharing strategy. The codebase currently uses one primitive —
+      an unbounded MPMC channel — for jobs that want five different ones.
+    </p>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>When you need</th><th>Reach for</th><th>Not</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="k">Many senders, one owner of a resource</td>
+          <td class="yes">bounded <code>tokio::sync::mpsc</code></td>
+          <td class="no">anything unbounded</td>
+        </tr>
+        <tr>
+          <td class="k">One request, one reply</td>
+          <td class="yes"><code>oneshot</code> + table keyed on the protocol's id</td>
+          <td class="no">a shared map keyed on command type</td>
+        </tr>
+        <tr>
+          <td class="k">N workers competing for the same jobs</td>
+          <td class="yes"><code>async_channel</code> (true MPMC)</td>
+          <td class="no">mpsc plus manual sharding</td>
+        </tr>
+        <tr>
+          <td class="k">Same value to every subscriber</td>
+          <td class="yes"><code>broadcast</code></td>
+          <td class="no">cloning into N mpsc senders</td>
+        </tr>
+        <tr>
+          <td class="k">Latest-value state (current broker, config)</td>
+          <td class="yes"><code>watch</code> or <code>ArcSwap</code></td>
+          <td class="no"><code>Mutex&lt;T&gt;</code> read on the hot path</td>
+        </tr>
+        <tr>
+          <td class="k">Read-mostly map on the hot path</td>
+          <td class="yes">sharded <code>RwLock&lt;HashMap&gt;</code> or <code>DashMap</code></td>
+          <td class="no">one process-wide <code>Mutex</code></td>
+        </tr>
+        <tr>
+          <td class="k">State exactly one task touches</td>
+          <td class="yes">plain ownership, no lock at all</td>
+          <td class="no"><code>Mutex</code> for reassurance</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <p>
+      That last row is worth dwelling on. <code>Pulsar</code> wraps its two managers in
+      <code>futures::lock::Mutex</code> even though a single task owns them, and then holds
+      both guards across a <code>select!</code>. The locks buy nothing and cost a guard held
+      across every await in the loop. The idiomatic rule in async Rust is
+      <strong>ownership over locking</strong>: give state exactly one owner, use a lock only
+      for genuinely shared read-mostly data, and never hold a guard across I/O.
+    </p>
+  </div>
+</section>
+
+<!-- ============ 7. WHEN THE HUB IS RIGHT ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Counterpoint</p>
+    <h2>When a central dispatcher is the right answer</h2>
+    <p>
+      It would be dishonest to present the hub as simply wrong. It is the correct pattern
+      when you need <em>global</em> ordering across clients — a total order that no
+      per-connection design can give you. It is correct when the number of participants is
+      small and fixed, where O(N) traversal is a handful of pointer derefs. And it is correct
+      when the shared-state mutation rate is high relative to the message rate, because then
+      the serialization you are paying for is doing real work.
+    </p>
+    <p>
+      A messaging client is none of those. Ordering guarantees are per topic and per producer,
+      and they are enforced by sequence ids on the wire rather than by client-side scheduling.
+      The participant count is unbounded and user-controlled. And the shared state — which
+      broker owns which topic — changes on lookups and reconnects, which are rare relative
+      to messages. The traffic is almost pure message passing over almost static routing
+      state, which is the exact profile that wants a shared table and no hub.
+    </p>
+  </div>
+</section>
+
+<!-- ============ 8. BUILD ORDER ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Sequencing</p>
+    <h2>An order that ships</h2>
+    <p class="lede">
+      Each stage stands alone, keeps the public API, and is worth landing on its own.
+      Nothing here requires a rewrite, which matters — the protocol layer is the part
+      that took the work, and none of it needs to change.
+    </p>
+
+    <div class="stage">
+      <div class="n">Stage 1</div>
+      <div>
+        <h4>Move correlation onto <code>request_id</code></h4>
+        <p>
+          <code>HashMap&lt;u64, Pending&gt;</code> scoped per connection, with a deadline on
+          every entry and an interval that sweeps expiries. Drop the string keys. Removes an
+          allocation and a hash from every publish, and makes concurrent same-kind requests
+          well-defined.
+        </p>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="n">Stage 2</div>
+      <div>
+        <h4>Bound the channels, make payloads <code>Bytes</code></h4>
+        <p>
+          Capacities become a config surface. Decode with <code>split_to().freeze()</code>
+          and delete the relay clones. Purely mechanical, no topology change, and the
+          <code>memcpy</code> disappears.
+        </p>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="n">Stage 3</div>
+      <div>
+        <h4>Split reader and writer, add the coalescing flush</h4>
+        <p>
+          Two tasks per connection over a split <code>Framed</code>.
+          <code>recv_many</code> + <code>feed</code> + one <code>flush</code>. This is where
+          the throughput curve changes shape.
+        </p>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="n">Stage 4</div>
+      <div>
+        <h4>Introduce the registry, retire the hub</h4>
+        <p>
+          Readers route by id straight to client inboxes; clients hold handles and publish
+          straight to writer queues. <code>Pulsar::start_pulsar</code>,
+          <code>ClientManager</code> and <code>ConnectionManager</code> all go away. Dispatch
+          now scales with cores.
+        </p>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="n">Stage 5</div>
+      <div>
+        <h4>Supervise, reconnect, replay</h4>
+        <p>
+          Per-broker supervisor with jittered backoff and session replay, retryability on the
+          error type, and consumer credit tied to inbox capacity. Ticks the last two boxes on
+          the README.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div class="col close">
+    <h3 style="margin-top:0">The one-sentence version</h3>
+    <p>
+      Stop moving messages through a task and start moving them through a table: give every
+      socket its own reader and writer, let senders converge into bounded queues instead of
+      making a receiver poll them, key in-flight requests on the id the protocol already
+      gives you, pass payloads by refcount, and put a supervisor over anything that can die.
+    </p>
+    <p style="color:var(--muted); font-size:.95rem">
+      Everything above is a change to how the pieces are wired. The protobuf layer, the codec,
+      the builders and the public API survive it — which is the argument for doing it now,
+      while the surface is still small.
+    </p>
+  </div>
+</section>
+
+</div>
