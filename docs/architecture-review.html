@@ -9,6 +9,7 @@
     --ink:#0F1721; --muted:#54626F; --line:#D3DDE4; --line-soft:#E3EBF0;
     --accent:#06697C; --accent-soft:#DEF0F4; --accent-ink:#04505E;
     --hot:#A8321E; --warm:#8A5A08; --good:#1F6B41;
+    --chart-rust:#0B87A0; --chart-cpp:#8A5A08;
     --display:"Archivo",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     --body:"Source Serif 4",Georgia,"Times New Roman",serif;
     --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -20,6 +21,7 @@
       --ink:#E2EAF1; --muted:#8B9BA9; --line:#243342; --line-soft:#1B2733;
       --accent:#4CD4E8; --accent-soft:#0D2932; --accent-ink:#8AE4F2;
       --hot:#F0836B; --warm:#E0AC55; --good:#66C48F;
+      --chart-rust:#1493A9; --chart-cpp:#B58335;
     }
   }
   :root[data-theme="dark"]{
@@ -27,6 +29,7 @@
     --ink:#E2EAF1; --muted:#8B9BA9; --line:#243342; --line-soft:#1B2733;
     --accent:#4CD4E8; --accent-soft:#0D2932; --accent-ink:#8AE4F2;
     --hot:#F0836B; --warm:#E0AC55; --good:#66C48F;
+    --chart-rust:#1493A9; --chart-cpp:#B58335;
   }
 
   *{box-sizing:border-box}
@@ -216,7 +219,7 @@
       <span><b>Reviewed at</b> 95ed1ee</span>
       <span><b>Scope</b> message passing &amp; processing layers</span>
       <span><b>3,794</b> lines of Rust</span>
-      <span style="color:var(--good)"><b>Status</b> implemented &#8212; all five stages landed on claude/rust-messaging-architecture-bkrew7 (60e5e99&#8230;9c2623b)</span>
+      <span style="color:var(--good)"><b>Status</b> implemented &#8212; all five stages landed on claude/rust-messaging-architecture-bkrew7, benchmarked below</span>
     </div>
   </div>
 </header>
@@ -949,6 +952,139 @@
       broker owns which topic — changes on lookups and reconnects, which are rare relative
       to messages. The traffic is almost pure message passing over almost static routing
       state, which is the exact profile that wants a shared table and no hub.
+    </p>
+  </div>
+</section>
+
+
+<!-- ============ 7b. BENCHMARKS ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Measured</p>
+    <h2>Benchmarked against the C++ client</h2>
+    <p class="lede">
+      Claims about throughput patterns deserve numbers. Both clients were run
+      against the <em>same</em> lightweight protocol server &#8212; the crate's fake
+      broker, serving the wire protocol over real TCP through the production
+      codec in a separate process &#8212; so the broker cancels out and the
+      difference is client overhead, which is what this document is about.
+    </p>
+    <p>
+      Matched harnesses: producers publish with a 1,000-message in-flight cap
+      and await every receipt; consumers measure delivery throughput with flow
+      control live (neutron grants 500 credits, re-granted past the halfway
+      mark; the C++ client was configured to the same 500-slot receiver queue)
+      and the clock starting at the first message. Four runs per configuration
+      against a fresh broker each; the first is warmup, the number reported is
+      the median of the remaining three.
+    </p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 880 452" role="img" aria-label="Paired bar chart: neutron versus pulsar-client-cpp message throughput across five benchmark configurations; neutron leads every matchup, from 14.7 times faster on unbatched 100-byte publishes to 1.2 times on 4-kilobyte consumes">
+      <g font-family="IBM Plex Mono, ui-monospace, monospace">
+        <rect x="590" y="8" width="10" height="10" rx="2" fill="var(--chart-rust)"></rect>
+        <text class="t-s" x="606" y="17">neutron</text>
+        <rect x="700" y="8" width="10" height="10" rx="2" fill="var(--chart-cpp)"></rect>
+        <text class="t-s" x="716" y="17">pulsar-cpp 4.1</text>
+      </g>
+
+      <!-- producer / unbatched / 100B -->
+      <text class="t-b" x="24" y="52">producer &#183; unbatched &#183; 100 B</text>
+      <text class="t-hot" x="336" y="52">14.7&#215;</text>
+      <rect x="124" y="62" width="500" height="16" rx="2" fill="var(--chart-rust)"></rect>
+      <rect x="124" y="82" width="34" height="16" rx="2" fill="var(--chart-cpp)"></rect>
+      <text class="t-s" x="116" y="74" text-anchor="end">neutron</text>
+      <text class="t-s" x="116" y="94" text-anchor="end">cpp</text>
+      <text class="t" x="632" y="74">257.9k msg/s</text>
+      <text class="t" x="166" y="94">17.5k msg/s</text>
+
+      <!-- producer / unbatched / 4KB -->
+      <text class="t-b" x="24" y="136">producer &#183; unbatched &#183; 4 KB</text>
+      <text class="t-hot" x="322" y="136">5.6&#215;</text>
+      <rect x="124" y="146" width="500" height="16" rx="2" fill="var(--chart-rust)"></rect>
+      <rect x="124" y="166" width="89" height="16" rx="2" fill="var(--chart-cpp)"></rect>
+      <text class="t-s" x="116" y="158" text-anchor="end">neutron</text>
+      <text class="t-s" x="116" y="178" text-anchor="end">cpp</text>
+      <text class="t" x="632" y="158">95.5k msg/s</text>
+      <text class="t" x="221" y="178">17.0k msg/s</text>
+
+      <!-- producer / batched / 100B -->
+      <text class="t-b" x="24" y="220">producer &#183; batched &#215;500 &#183; 100 B</text>
+      <text class="t-hot" x="366" y="220">5.3&#215;</text>
+      <rect x="124" y="230" width="500" height="16" rx="2" fill="var(--chart-rust)"></rect>
+      <rect x="124" y="250" width="95" height="16" rx="2" fill="var(--chart-cpp)"></rect>
+      <text class="t-s" x="116" y="242" text-anchor="end">neutron</text>
+      <text class="t-s" x="116" y="262" text-anchor="end">cpp</text>
+      <text class="t" x="632" y="242">1.62M msg/s</text>
+      <text class="t" x="227" y="262">307.9k msg/s</text>
+
+      <!-- consumer / 100B -->
+      <text class="t-b" x="24" y="304">consumer &#183; 100 B</text>
+      <text class="t-hot" x="204" y="304">2.6&#215;</text>
+      <rect x="124" y="314" width="500" height="16" rx="2" fill="var(--chart-rust)"></rect>
+      <rect x="124" y="334" width="194" height="16" rx="2" fill="var(--chart-cpp)"></rect>
+      <text class="t-s" x="116" y="326" text-anchor="end">neutron</text>
+      <text class="t-s" x="116" y="346" text-anchor="end">cpp</text>
+      <text class="t" x="632" y="326">177.0k msg/s</text>
+      <text class="t" x="326" y="346">68.6k msg/s</text>
+
+      <!-- consumer / 4KB -->
+      <text class="t-b" x="24" y="388">consumer &#183; 4 KB</text>
+      <text class="t-hot" x="196" y="388">1.2&#215;</text>
+      <rect x="124" y="398" width="500" height="16" rx="2" fill="var(--chart-rust)"></rect>
+      <rect x="124" y="418" width="433" height="16" rx="2" fill="var(--chart-cpp)"></rect>
+      <text class="t-s" x="116" y="410" text-anchor="end">neutron</text>
+      <text class="t-s" x="116" y="430" text-anchor="end">cpp</text>
+      <text class="t" x="632" y="410">52.0k msg/s</text>
+      <text class="t" x="565" y="430">45.0k msg/s</text>
+    </svg>
+    <figcaption>
+      <b>Fig 6 &#8212; Throughput per matchup, medians of 3 runs after warmup.</b>
+      Bars are scaled within each pair (the longer bar is the pair's own
+      maximum), so bar length shows the ratio and the printed value carries the
+      magnitude. Environment: 4-core container, Ubuntu 24.04, rustc 1.94,
+      pulsar-client-cpp 4.1.0 (g++ 13.3, -O2), loopback TCP.
+    </figcaption>
+  </figure>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>Bench</th><th>Payload</th><th>neutron msg/s</th><th>pulsar-cpp msg/s</th><th>Ratio</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="k">producer, unbatched</td><td>100 B</td><td>257,858</td><td>17,548</td><td class="yes">14.7&#215;</td></tr>
+        <tr><td class="k">producer, unbatched</td><td>4 KB</td><td>95,470</td><td>16,986</td><td class="yes">5.6&#215;</td></tr>
+        <tr><td class="k">producer, batched &#215;500</td><td>100 B</td><td>1,616,997</td><td>307,853</td><td class="yes">5.3&#215;</td></tr>
+        <tr><td class="k">consumer</td><td>100 B</td><td>176,959</td><td>68,558</td><td class="yes">2.6&#215;</td></tr>
+        <tr><td class="k">consumer</td><td>4 KB</td><td>51,990</td><td>45,028</td><td class="yes">1.2&#215;</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <h3>What the numbers say &#8212; and what they don't</h3>
+    <p>
+      The unbatched-producer column is the coalesced flush doing exactly what
+      Fig&nbsp;3 promised: neutron's writer drains its queue and flushes once
+      per batch even for individually-published messages, while the C++ client
+      writes each unbatched message separately &#8212; which is precisely why its
+      defaults turn protocol batching on. With both sides batching, the gap
+      narrows to the per-message bookkeeping and copies, and neutron still
+      clears 1.6M receipts per second. The consumer matchups tighten as
+      payloads grow &#8212; at 4&nbsp;KB the work is dominated by moving bytes,
+      which both clients ultimately delegate to the kernel.
+    </p>
+    <p>
+      Honest caveats: this is a client-overhead microbenchmark, not an
+      end-to-end broker benchmark &#8212; the server is featherweight and
+      co-located, so absolute numbers will not survive contact with a real
+      cluster, though the client-side ratios should. The C++ client ran its
+      shipped defaults (one IO thread per connection, which is its
+      architecture, not a misconfiguration). And both harnesses live in the
+      repo (<code>bench/run.sh</code>), so the numbers are reproducible rather
+      than anecdotal.
     </p>
   </div>
 </section>
