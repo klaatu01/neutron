@@ -167,14 +167,7 @@ where
             topic: topic.clone(),
         };
 
-        let pulsar_engine_connection = pulsar_manager.register(topic, id).await?;
-
-        let client = Client::new(
-            pulsar_engine_connection,
-            id,
-            name,
-            pulsar_manager.request_id_generator(),
-        );
+        let client = pulsar_manager.register(id, name).await?;
 
         let producer = Producer {
             config,

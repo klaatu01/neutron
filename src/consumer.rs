@@ -371,14 +371,7 @@ where
             subscription,
         };
 
-        let pulsar_engine_connection = pulsar_manager.register(topic, consumer_id).await?;
-
-        let client = Client::new(
-            pulsar_engine_connection,
-            consumer_id,
-            consumer_name,
-            pulsar_manager.request_id_generator(),
-        );
+        let client = pulsar_manager.register(consumer_id, consumer_name).await?;
 
         let consumer = Consumer {
             config: consumer_config,

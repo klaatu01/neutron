@@ -28,9 +28,6 @@ pub(crate) enum CorrelationKey {
     /// `CommandSendReceipt` carries no request id; receipts correlate on
     /// the producer's own sequence numbering.
     ProducerSequence { producer_id: u64, sequence_id: u64 },
-    /// The CONNECT handshake: `CONNECTED` carries no id, so at most one
-    /// may be in flight per table.
-    Connect,
 }
 
 impl CorrelationKey {
@@ -38,7 +35,7 @@ impl CorrelationKey {
     /// or `None` for fire-and-forget commands (ping, pong, flow, auth).
     pub(crate) fn of_outbound(outbound: &Outbound) -> Option<CorrelationKey> {
         match outbound {
-            Outbound::Connect(_) => Some(CorrelationKey::Connect),
+            Outbound::Connect(_) => None,
             Outbound::Send(send) => Some(CorrelationKey::ProducerSequence {
                 producer_id: send.producer_id(),
                 sequence_id: send.sequence_id(),
@@ -61,7 +58,7 @@ impl CorrelationKey {
     /// response (messages, pings, auth challenges).
     pub(crate) fn of_inbound(inbound: &Inbound) -> Option<CorrelationKey> {
         match inbound {
-            Inbound::Connected(_) => Some(CorrelationKey::Connect),
+            Inbound::Connected(_) => None,
             Inbound::SendReceipt(receipt) => Some(CorrelationKey::ProducerSequence {
                 producer_id: receipt.producer_id,
                 sequence_id: receipt.sequence_id,
@@ -74,6 +71,7 @@ impl CorrelationKey {
             Inbound::ProducerSuccess(success) => {
                 Some(CorrelationKey::RequestId(success.request_id))
             }
+            Inbound::Error(error) => Some(CorrelationKey::RequestId(error.request_id)),
             Inbound::Ping | Inbound::Pong | Inbound::Message(_) | Inbound::AuthChallengeRequest(_) => {
                 None
             }
@@ -81,8 +79,7 @@ impl CorrelationKey {
     }
 }
 
-pub(crate) type ResponseSender =
-    futures::channel::oneshot::Sender<Result<Inbound, NeutronError>>;
+pub(crate) type ResponseSender = tokio::sync::oneshot::Sender<Result<Inbound, NeutronError>>;
 
 struct Pending {
     tx: ResponseSender,
@@ -150,7 +147,13 @@ impl Inflight {
         let pending = self.entries.lock().unwrap().remove(&key);
         match pending {
             Some(pending) => {
-                let _ = pending.tx.send(Ok(inbound.clone()));
+                let response = match inbound {
+                    Inbound::Error(error) => {
+                        Err(NeutronError::PulsarError(error.error.clone()))
+                    }
+                    other => Ok(other.clone()),
+                };
+                let _ = pending.tx.send(response);
                 true
             }
             None => false,
@@ -242,8 +245,11 @@ mod tests {
         })
     }
 
-    fn register(inflight: &Inflight, outbound: &Outbound) -> futures::channel::oneshot::Receiver<Result<Inbound, NeutronError>> {
-        let (tx, rx) = futures::channel::oneshot::channel();
+    fn register(
+        inflight: &Inflight,
+        outbound: &Outbound,
+    ) -> tokio::sync::oneshot::Receiver<Result<Inbound, NeutronError>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
         inflight.register(CorrelationKey::of_outbound(outbound).unwrap(), tx);
         rx
     }

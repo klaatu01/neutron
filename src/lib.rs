@@ -1,18 +1,20 @@
 mod auth;
 mod broker_address;
 mod client;
-mod client_manager;
 mod codec;
-mod combinators;
-mod correlation;
 mod connection;
-mod connection_manager;
+mod correlation;
 mod consumer;
-mod engine;
 mod error;
 mod message;
 mod producer;
 mod pulsar;
+mod registry;
+
+#[cfg(test)]
+mod fake_broker;
+#[cfg(test)]
+mod integration_tests;
 
 pub use auth::*;
 pub use client::*;

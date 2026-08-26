@@ -40,28 +40,6 @@ pub struct MessageCommand {
     pub payload: Option<Payload>,
 }
 
-#[derive(Debug)]
-pub(crate) enum Command<Outbound, Inbound>
-where
-    Outbound: Clone,
-    Inbound: Clone,
-{
-    Request(Outbound),
-    RequestResponse(
-        Outbound,
-        futures::channel::oneshot::Sender<Result<Inbound, NeutronError>>,
-    ),
-}
-
-impl Command<Outbound, Inbound> {
-    pub fn get_outbound(&self) -> Outbound {
-        match self {
-            Command::Request(outbound) => outbound.clone(),
-            Command::RequestResponse(outbound, _) => outbound.clone(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum Outbound {
     Pong,
@@ -122,6 +100,7 @@ pub enum Inbound {
     AuthChallengeRequest(AuthChallengeRequest),
     Success(Success),
     ProducerSuccess(ProducerSuccess),
+    Error(RemoteError),
 }
 
 impl Display for Inbound {
@@ -137,6 +116,7 @@ impl Display for Inbound {
             Inbound::AuthChallengeRequest(_) => write!(f, "AuthChallengeRequest"),
             Inbound::Success(_) => write!(f, "Success"),
             Inbound::ProducerSuccess(_) => write!(f, "ProducerSuccess"),
+            Inbound::Error(_) => write!(f, "Error"),
         }
     }
 }
@@ -155,7 +135,7 @@ impl Inbound {
 impl TryFrom<MessageCommand> for Inbound {
     type Error = NeutronError;
 
-    fn try_from(value: MessageCommand) -> Result<Self, Self::Error> {
+    fn try_from(value: MessageCommand) -> Result<Self, NeutronError> {
         match value.command.type_() {
             proto::pulsar::base_command::Type::PING => Ok(Inbound::Ping),
             proto::pulsar::base_command::Type::PONG => Ok(Inbound::Pong),
@@ -184,8 +164,11 @@ impl TryFrom<MessageCommand> for Inbound {
                 ProducerSuccess::try_from(value).map(Inbound::ProducerSuccess)
             }
             proto::pulsar::base_command::Type::ERROR => {
-                log::error!("Error: {:?}", value.command.error.message());
-                Err(NeutronError::UnsupportedCommand)
+                let error = &value.command.error;
+                Ok(Inbound::Error(RemoteError {
+                    request_id: error.request_id(),
+                    error: format!("{:?}: {}", error.error(), error.message()),
+                }))
             }
             _ => Err(NeutronError::UnsupportedCommand),
         }
@@ -622,7 +605,7 @@ impl Message {
 impl TryFrom<Inbound> for Message {
     type Error = NeutronError;
 
-    fn try_from(value: Inbound) -> Result<Self, Self::Error> {
+    fn try_from(value: Inbound) -> Result<Self, NeutronError> {
         match value {
             Inbound::Message(message) => Ok(message),
             _ => Err(NeutronError::Unresolvable),
@@ -1050,6 +1033,14 @@ impl TryFrom<MessageCommand> for ProducerSuccess {
             _ => Err(NeutronError::Unresolvable),
         }
     }
+}
+
+// A wire-level ERROR frame: the broker rejecting the request named by
+// request_id.
+#[derive(Debug, Clone)]
+pub struct RemoteError {
+    pub request_id: u64,
+    pub error: String,
 }
 
 #[cfg(test)]

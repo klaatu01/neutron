@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use protobuf::Message as _;
 
 use crate::message::proto::pulsar::{BaseCommand, MessageMetadata};
