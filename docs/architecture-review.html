@@ -1184,6 +1184,52 @@
   </div>
 </section>
 
+
+<!-- ============ 7c. MATURITY ============ -->
+<section>
+  <div class="col">
+    <p class="sec-tag">Owed</p>
+    <h2>What the benchmarks don't buy: maturity</h2>
+    <p class="lede">
+      Part of the honest answer to "why is it faster" was "it does less."
+      The full gap analysis lives in the repo's <code>ROADMAP.md</code>;
+      the shape of it belongs here, because some of these features spend
+      the performance budget the benchmarks just measured.
+    </p>
+    <p>
+      <strong>P0 &#8212; not a Pulsar client without them:</strong> partitioned
+      topics (the single biggest gap &#8212; routing modes and per-partition
+      consumers over the existing registry); message keys, properties and
+      event time in both directions; subscription types beyond the
+      hardcoded Shared, plus initial position; handling broker-initiated
+      <code>CloseProducer</code>/<code>CloseConsumer</code> (brokers routinely ask
+      healthy clients to move &#8212; it is the other half of reconnection);
+      graceful close APIs; negative acks and ack-timeout redelivery; a
+      true resend buffer so unreceipted sends replay after reconnect; a
+      real configuration surface; typed server errors; lookup redirects.
+    </p>
+    <p>
+      <strong>P1</strong> is production policy: send timeouts and pending
+      limits, automatic batching (making the 1.9M-receipts path the
+      default path), LZ4/ZSTD compression, chunking, multi-host service
+      URLs and connection pools, mTLS. <strong>P2</strong> is ecosystem:
+      reader API, multi-topic and regex subscriptions, dead-letter
+      policy, delayed delivery, schema registry, transactions last.
+      <strong>P3</strong> is trust: CI against a real broker, fuzzing the
+      codec, soak tests over scheduled connection kills, and benchmark
+      regression gates so Figs 6&#8211;7 stay true as features land.
+    </p>
+    <p>
+      The budget rules that keep the numbers: resend buffers and send
+      timeouts live per producer and resolve at receipt time, never
+      inside the writer's drain loop; metadata is built in the caller's
+      task with properties unallocated when absent; compression and
+      chunking happen before enqueue and after routing, so the
+      connection actors stay pure transport.
+    </p>
+  </div>
+</section>
+
 <!-- ============ 8. BUILD ORDER ============ -->
 <section>
   <div class="col">
