@@ -10,9 +10,7 @@ use nom::{
 };
 use protobuf::{Message as _, MessageField};
 
-use crate::{
-    broker_address::BrokerAddress, codec::Payload, command_resolver::ResolverKey, NeutronError,
-};
+use crate::{broker_address::BrokerAddress, codec::Payload, NeutronError};
 
 use self::proto::pulsar::{
     AuthData, BaseCommand, MessageIdData, MessageMetadata, SingleMessageMetadata,
@@ -95,22 +93,6 @@ impl Display for Outbound {
     }
 }
 
-impl ResolverKey for Outbound {
-    fn try_key(&self) -> Option<String> {
-        match self {
-            Outbound::Connect(_) => Some("CONNECT".to_string()),
-            Outbound::Send(send) => Some(format!("SEND:{}", send.sequence_id())),
-            Outbound::Ack(_) => Some("ACK".to_string()),
-            Outbound::LookupTopic(_) => Some("LOOKUP".to_string()),
-            Outbound::Subscribe(_) => Some("SUBSCRIBE".to_string()),
-            Outbound::AuthChallenge(_) => Some("AUTH_CHALLENGE".to_string()),
-            Outbound::Flow(_) => Some("FLOW".to_string()),
-            Outbound::Producer(_) => Some("PRODUCER".to_string()),
-            _ => None,
-        }
-    }
-}
-
 impl From<Outbound> for MessageCommand {
     fn from(val: Outbound) -> Self {
         match val {
@@ -165,24 +147,6 @@ impl Inbound {
             Inbound::SendReceipt(receipt) => Some(receipt.producer_id),
             Inbound::AckReciept(receipt) => Some(receipt.consumer_id),
             Inbound::Message(message) => Some(message.consumer_id()),
-            _ => None,
-        }
-    }
-}
-
-impl ResolverKey for Inbound {
-    fn try_key(&self) -> Option<String> {
-        match self {
-            Inbound::Connected(_) => Some("CONNECT".to_string()),
-            Inbound::SendReceipt(SendReceipt { sequence_id, .. }) => {
-                Some(format!("SEND:{}", sequence_id))
-            }
-            Inbound::AckReciept(_) => Some("ACK".to_string()),
-            Inbound::Message(_) => Some("MESSAGE".to_string()),
-            Inbound::LookupTopicResponse(_) => Some("LOOKUP".to_string()),
-            Inbound::AuthChallengeRequest(_) => Some("AUTH_CHALLENGE".to_string()),
-            Inbound::Success(_) => Some("SUBSCRIBE".to_string()),
-            Inbound::ProducerSuccess(_) => Some("PRODUCER".to_string()),
             _ => None,
         }
     }

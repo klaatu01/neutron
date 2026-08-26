@@ -37,6 +37,7 @@ protobuf-codegen = "3.3.0"
 
 [dev-dependencies]
 humantime = "2.1.0"
+tokio = { version = "1.35.1", features = ["test-util"] }
 mockall = "0.12.1"
 nanoid = "0.4.0"
 

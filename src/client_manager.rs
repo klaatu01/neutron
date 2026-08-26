@@ -1,9 +1,11 @@
 
 use futures::FutureExt;
 
+use std::sync::Arc;
+
 use crate::{
     broker_address::BrokerAddress,
-    command_resolver::CommandResolver,
+    correlation::{CorrelationKey, Inflight},
     engine::EngineConnection,
     message::{Command, Inbound, Outbound},
     NeutronError,
@@ -46,14 +48,14 @@ impl ClientConnection {
 
 pub(crate) struct ClientManager {
     clients: Vec<ClientConnection>,
-    pub(crate) command_resolver: CommandResolver<Outbound, Inbound>,
+    pub(crate) inflight: Arc<Inflight>,
 }
 
 impl ClientManager {
     pub(crate) fn new() -> Self {
         ClientManager {
             clients: Vec::new(),
-            command_resolver: CommandResolver::new(),
+            inflight: Inflight::new(),
         }
     }
 
@@ -79,7 +81,12 @@ impl ClientManager {
         let outbound = match next.1 {
             Ok(cmd) => match cmd {
                 Command::RequestResponse(outbound, sender) => {
-                    self.command_resolver.put(outbound.clone(), sender).await;
+                    match CorrelationKey::of_outbound(&outbound) {
+                        Some(key) => self.inflight.register(key, sender),
+                        None => {
+                            let _ = sender.send(Err(NeutronError::Unresolvable));
+                        }
+                    }
                     Ok(outbound)
                 }
                 _ => Ok(cmd.get_outbound()),
@@ -95,7 +102,7 @@ impl ClientManager {
         inbound: &Inbound,
         broker_address: &BrokerAddress,
     ) -> Result<(), NeutronError> {
-        if self.command_resolver.try_resolve(inbound.clone()).await {
+        if self.inflight.try_resolve(inbound) {
             return Ok(());
         }
 

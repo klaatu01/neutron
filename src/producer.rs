@@ -169,7 +169,12 @@ where
 
         let pulsar_engine_connection = pulsar_manager.register(topic, id).await?;
 
-        let client = Client::new(pulsar_engine_connection, id, name);
+        let client = Client::new(
+            pulsar_engine_connection,
+            id,
+            name,
+            pulsar_manager.request_id_generator(),
+        );
 
         let producer = Producer {
             config,

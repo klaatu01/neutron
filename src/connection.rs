@@ -1,6 +1,6 @@
 use crate::broker_address::BrokerAddress;
 use crate::codec::Codec;
-use crate::command_resolver::CommandResolver;
+use crate::correlation::{CorrelationKey, Inflight};
 use crate::engine::{Engine, EngineConnection};
 use crate::error::NeutronError;
 use crate::message::{Command, Inbound, MessageCommand, Outbound};
@@ -21,7 +21,7 @@ pub enum ConnectionStream {
 
 pub struct PulsarConnection {
     stream: ConnectionStream,
-    command_resolver: CommandResolver<Outbound, Inbound>,
+    inflight: std::sync::Arc<Inflight>,
 }
 
 impl ConnectionStream {
@@ -115,7 +115,7 @@ impl PulsarConnection {
 
         Ok(Self {
             stream,
-            command_resolver: CommandResolver::new(),
+            inflight: Inflight::new(),
         })
     }
 
@@ -130,7 +130,12 @@ impl PulsarConnection {
                         Ok(command) => {
                             let outbound = command.get_outbound();
                             if let Command::RequestResponse(outbound, sender) = command {
-                                self.command_resolver.put(outbound, sender).await;
+                                match CorrelationKey::of_outbound(&outbound) {
+                                    Some(key) => self.inflight.register(key, sender),
+                                    None => {
+                                        let _ = sender.send(Err(NeutronError::Unresolvable));
+                                    }
+                                }
                             };
                             log::debug!("-> {}", outbound.to_string());
                             let msg: MessageCommand = outbound.into();
@@ -180,7 +185,7 @@ impl PulsarConnection {
                     }
 
                     if let Ok(inbound) = &inbound {
-                        if self.command_resolver.try_resolve(inbound.clone()).await {
+                        if self.inflight.try_resolve(inbound) {
                             continue
                         }
                         if client_connection.send(Ok(inbound.clone())).await.is_err() {
@@ -198,8 +203,10 @@ impl PulsarConnection {
 impl Engine<Inbound, Command<Outbound, Inbound>> for PulsarConnection {
     async fn run(mut self) -> EngineConnection<Command<Outbound, Inbound>, Inbound> {
         let (client_connection, connection) = EngineConnection::pair();
+        self.inflight.start_sweeper();
         tokio::task::spawn(async move {
             self.start_connection(client_connection).await;
+            self.inflight.drain(NeutronError::Disconnected);
         });
         connection
     }

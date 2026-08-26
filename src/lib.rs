@@ -4,7 +4,7 @@ mod client;
 mod client_manager;
 mod codec;
 mod combinators;
-mod command_resolver;
+mod correlation;
 mod connection;
 mod connection_manager;
 mod consumer;

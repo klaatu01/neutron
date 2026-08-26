@@ -303,6 +303,7 @@ impl Pulsar {
         registration_manager_connection: EngineConnection<(), ClientRegistration>,
     ) {
         self.registration_manager_connection = Some(registration_manager_connection);
+        self.client_manager.lock().await.inflight.start_sweeper();
         let broker_address = self.config.broker_address();
         match self.new_connection(&broker_address).await {
             Ok(_) => {
@@ -383,6 +384,7 @@ impl PulsarBuilder {
 
 pub struct PulsarManager {
     client_id_generator: AtomicU64,
+    request_id_generator: std::sync::Arc<AtomicU64>,
     inner_connection: EngineConnection<ClientRegistration, ()>,
 }
 
@@ -390,6 +392,7 @@ impl PulsarManager {
     pub(crate) fn new(inner_connection: EngineConnection<ClientRegistration, ()>) -> Self {
         Self {
             client_id_generator: AtomicU64::new(0),
+            request_id_generator: std::sync::Arc::new(AtomicU64::new(0)),
             inner_connection,
         }
     }
@@ -397,6 +400,13 @@ impl PulsarManager {
     pub(crate) fn new_client_id(&self) -> u64 {
         self.client_id_generator
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Request ids must be unique across every client sharing a
+    /// connection — responses are correlated by them — so allocation is
+    /// owned here rather than per client.
+    pub(crate) fn request_id_generator(&self) -> std::sync::Arc<AtomicU64> {
+        self.request_id_generator.clone()
     }
 
     pub(crate) async fn register(

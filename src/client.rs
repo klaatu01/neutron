@@ -1,6 +1,9 @@
 use std::{
     pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -21,7 +24,9 @@ pub struct Client {
     pub(crate) pulsar_engine_connection: EngineConnection<Command<Outbound, Inbound>, Inbound>,
     pub(crate) client_id: u64,
     pub(crate) client_name: String,
-    pub(crate) request_id: AtomicU64,
+    /// Shared with every other client: responses are correlated by
+    /// request id, so ids must be unique across the whole connection.
+    pub(crate) request_id: Arc<AtomicU64>,
     pub(crate) sequence_id: AtomicU64,
 }
 
@@ -71,12 +76,13 @@ impl Client {
         pulsar_engine_connection: EngineConnection<Command<Outbound, Inbound>, Inbound>,
         client_id: u64,
         client_name: String,
+        request_id: Arc<AtomicU64>,
     ) -> Self {
         Self {
             pulsar_engine_connection,
             client_id,
             client_name,
-            request_id: AtomicU64::new(0),
+            request_id,
             sequence_id: AtomicU64::new(0),
         }
     }
