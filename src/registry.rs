@@ -161,7 +161,11 @@ impl Registry {
     }
 
     pub(crate) fn get_slot(&self, broker_address: &BrokerAddress) -> Option<Arc<ConnectionSlot>> {
-        self.connections.lock().unwrap().get(broker_address).cloned()
+        self.connections
+            .lock()
+            .unwrap()
+            .get(broker_address)
+            .cloned()
     }
 
     pub(crate) fn insert_slot(&self, slot: Arc<ConnectionSlot>) {

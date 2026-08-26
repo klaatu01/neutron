@@ -13,9 +13,9 @@ struct Data(String);
 impl TryFrom<Vec<u8>> for Data {
     type Error = crate::NeutronError;
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Ok(Data(String::from_utf8(value).map_err(|_| {
-            crate::NeutronError::DeserializationFailed
-        })?))
+        Ok(Data(
+            String::from_utf8(value).map_err(|_| crate::NeutronError::DeserializationFailed)?,
+        ))
     }
 }
 

@@ -107,8 +107,7 @@ impl tokio_util::codec::Decoder for Codec {
         // bytes below are slices of this one allocation.
         let frame: Bytes = src.split_to(frame_size).freeze();
 
-        let command_size =
-            u32::from_be_bytes(frame[4..FRAME_HEADER].try_into().unwrap()) as usize;
+        let command_size = u32::from_be_bytes(frame[4..FRAME_HEADER].try_into().unwrap()) as usize;
         let command_end = FRAME_HEADER + command_size;
         if command_end > frame.len() {
             return Err(NeutronError::DecodeFailed);

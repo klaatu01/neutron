@@ -20,12 +20,30 @@ use crate::message::MessageCommand;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BrokerEvent {
     Connect,
-    Lookup { topic: String },
-    Subscribe { consumer_id: u64, topic: String, subscription: String },
-    Flow { consumer_id: u64, permits: u32 },
-    Ack { consumer_id: u64, request_id: u64 },
-    Producer { producer_id: u64, topic: String },
-    Send { producer_id: u64, sequence_id: u64 },
+    Lookup {
+        topic: String,
+    },
+    Subscribe {
+        consumer_id: u64,
+        topic: String,
+        subscription: String,
+    },
+    Flow {
+        consumer_id: u64,
+        permits: u32,
+    },
+    Ack {
+        consumer_id: u64,
+        request_id: u64,
+    },
+    Producer {
+        producer_id: u64,
+        topic: String,
+    },
+    Send {
+        producer_id: u64,
+        sequence_id: u64,
+    },
 }
 
 enum PushCmd {
@@ -125,7 +143,12 @@ impl FakeBroker {
 
     /// The next recorded protocol event.
     pub(crate) async fn next_event(&self) -> BrokerEvent {
-        self.events.lock().await.recv().await.expect("broker event stream ended")
+        self.events
+            .lock()
+            .await
+            .recv()
+            .await
+            .expect("broker event stream ended")
     }
 
     /// Wait until `want` shows up, skipping unrelated events.
@@ -197,7 +220,9 @@ fn respond(
             let mut connected = proto::CommandConnected::new();
             connected.set_server_version("fake-broker".into());
             connected.set_protocol_version(21);
-            Some(base(Type::CONNECTED, |base| base.connected = MessageField::some(connected)))
+            Some(base(Type::CONNECTED, |base| {
+                base.connected = MessageField::some(connected)
+            }))
         }
         Type::PING => Some(base(Type::PONG, |base| {
             base.pong = MessageField::some(proto::CommandPong::new())
@@ -229,7 +254,9 @@ fn respond(
             });
             let mut success = proto::CommandSuccess::new();
             success.set_request_id(subscribe.request_id());
-            Some(base(Type::SUCCESS, |base| base.success = MessageField::some(success)))
+            Some(base(Type::SUCCESS, |base| {
+                base.success = MessageField::some(success)
+            }))
         }
         Type::FLOW => {
             let flow = &command.flow;
@@ -292,10 +319,7 @@ fn respond(
     }
 }
 
-fn base(
-    command_type: Type,
-    fill: impl FnOnce(&mut proto::BaseCommand),
-) -> MessageCommand {
+fn base(command_type: Type, fill: impl FnOnce(&mut proto::BaseCommand)) -> MessageCommand {
     let mut base = proto::BaseCommand::new();
     base.set_type(command_type);
     fill(&mut base);
@@ -322,7 +346,9 @@ fn message_frame(consumer_id: u64, entry_id: u64, data: &[u8]) -> MessageCommand
     metadata.set_sequence_id(entry_id);
     metadata.set_publish_time(0);
 
-    let mut frame = base(Type::MESSAGE, |base| base.message = MessageField::some(message));
+    let mut frame = base(Type::MESSAGE, |base| {
+        base.message = MessageField::some(message)
+    });
     frame.payload = Some(Payload {
         metadata,
         data: bytes::Bytes::copy_from_slice(data),

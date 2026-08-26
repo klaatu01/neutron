@@ -71,7 +71,10 @@ impl PulsarInner {
         self.request_id_generator.fetch_add(1, Ordering::SeqCst)
     }
 
-    async fn connect_command(&self, broker_address: &BrokerAddress) -> Result<Connect, NeutronError> {
+    async fn connect_command(
+        &self,
+        broker_address: &BrokerAddress,
+    ) -> Result<Connect, NeutronError> {
         let mut connect = Connect {
             auth_data: None,
             auth_method_name: None,
@@ -93,11 +96,7 @@ impl PulsarInner {
         let connection = PulsarConnection::connect(broker_address).await?;
         let (connected, connection) = connection.handshake(connect).await?;
         log::info!("Connected to {}", broker_address);
-        Ok(connection.spawn(
-            broker_address.clone(),
-            connected,
-            Arc::downgrade(self),
-        ))
+        Ok(connection.spawn(broker_address.clone(), connected, Arc::downgrade(self)))
     }
 
     /// The slot for `broker_address`, dialing a fresh connection if none

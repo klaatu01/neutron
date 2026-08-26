@@ -44,9 +44,7 @@ impl CorrelationKey {
                 .first()
                 .map(|ack| CorrelationKey::RequestId(ack.request_id)),
             Outbound::LookupTopic(lookup) => Some(CorrelationKey::RequestId(lookup.request_id)),
-            Outbound::Subscribe(subscribe) => {
-                Some(CorrelationKey::RequestId(subscribe.request_id))
-            }
+            Outbound::Subscribe(subscribe) => Some(CorrelationKey::RequestId(subscribe.request_id)),
             Outbound::Producer(producer) => Some(CorrelationKey::RequestId(producer.request_id)),
             Outbound::Ping | Outbound::Pong | Outbound::Flow(_) | Outbound::AuthChallenge(_) => {
                 None
@@ -72,9 +70,10 @@ impl CorrelationKey {
                 Some(CorrelationKey::RequestId(success.request_id))
             }
             Inbound::Error(error) => Some(CorrelationKey::RequestId(error.request_id)),
-            Inbound::Ping | Inbound::Pong | Inbound::Message(_) | Inbound::AuthChallengeRequest(_) => {
-                None
-            }
+            Inbound::Ping
+            | Inbound::Pong
+            | Inbound::Message(_)
+            | Inbound::AuthChallengeRequest(_) => None,
         }
     }
 }
@@ -148,9 +147,7 @@ impl Inflight {
         match pending {
             Some(pending) => {
                 let response = match inbound {
-                    Inbound::Error(error) => {
-                        Err(NeutronError::PulsarError(error.error.clone()))
-                    }
+                    Inbound::Error(error) => Err(NeutronError::PulsarError(error.error.clone())),
                     other => Ok(other.clone()),
                 };
                 let _ = pending.tx.send(response);
@@ -342,8 +339,14 @@ mod tests {
 
         inflight.drain(NeutronError::Disconnected);
 
-        assert!(matches!(rx_a.await.unwrap(), Err(NeutronError::Disconnected)));
-        assert!(matches!(rx_b.await.unwrap(), Err(NeutronError::Disconnected)));
+        assert!(matches!(
+            rx_a.await.unwrap(),
+            Err(NeutronError::Disconnected)
+        ));
+        assert!(matches!(
+            rx_b.await.unwrap(),
+            Err(NeutronError::Disconnected)
+        ));
     }
 
     /// A duplicate key rejects the new request; the original waiter is

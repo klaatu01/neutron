@@ -12,8 +12,30 @@ An [Apache Pulsar](https://github.com/apache/pulsar) client library, built with 
 - [x] TLS Support via [rustls](https://github.com/rustls/rustls) 🔐
 - [x] Async Resolution of Send & Acks 🪓
 - [x] Batching Support 📦
-- [ ] Automatic Reconnection ♻️
-- [ ] Automatic Operation Retry 🚀
+- [x] Automatic Reconnection ♻️
+- [x] Automatic Operation Retry 🚀
+
+## Architecture
+
+Neutron gives every broker connection its own actor: a reader task and a
+writer task over a split frame stream. The writer drains its queue and
+flushes once per batch, so syscall cost amortizes as load rises; the
+reader routes each inbound frame straight to the owning consumer or
+producer's bounded inbox by id. In-flight requests are correlated by the
+protocol's own `request_id` (and `(producer_id, sequence_id)` for send
+receipts) in a per-connection table where every entry either resolves,
+times out, or is failed on teardown — nothing waits forever.
+
+Clients hold a connection *slot* rather than the connection itself: when
+a connection dies, a per-broker supervisor re-dials with jittered
+backoff, swaps a fresh connection into the slot, and replays each
+session (re-subscribe, re-issue flow credit, re-register producers) onto
+the same inboxes clients were already reading from. Transient failures
+during the gap are retried automatically; keepalive pings detect
+half-open connections.
+
+A design review of this architecture (and the dispatch-loop design it
+replaced) lives in [`docs/architecture-review.html`](docs/architecture-review.html).
 
 ## Installation
 
