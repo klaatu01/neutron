@@ -1,0 +1,10 @@
+[package]
+name = "pulsar-rs-bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+env_logger = "0.11.11"
+futures = "0.3.34"
+pulsar = { version = "6.9.0", default-features = false, features = ["tokio-runtime"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }

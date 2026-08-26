@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Summarize bench/results.jsonl: median msgs/sec per config (run 1 is
-warmup and excluded), with the neutron : pulsar-cpp ratio per matchup."""
+warmup and excluded), one column per client, with each client's speed
+relative to neutron."""
 import json
 import statistics
 import sys
 from collections import defaultdict
+
+CLIENTS = ["neutron", "pulsar-cpp", "pulsar-rs"]
 
 
 def mode_of(row):
@@ -23,12 +26,27 @@ def main(path):
         groups[(mode_of(row), row["size"], row["client"])].append(row["msgs_per_sec"])
 
     matchups = sorted({(mode, size) for (mode, size, _) in groups})
-    print(f"{'bench':<18} {'size':>6}  {'neutron msg/s':>14}  {'pulsar-cpp msg/s':>17}  {'ratio':>7}")
+    header = f"{'bench':<18} {'size':>6}"
+    for client in CLIENTS:
+        header += f"  {client + ' msg/s':>18}"
+    header += "  " + "  ".join(f"{'n/' + c.split('-')[-1]:>7}" for c in CLIENTS[1:])
+    print(header)
     for mode, size in matchups:
-        neutron = statistics.median(groups.get((mode, size, "neutron"), [0]))
-        cpp = statistics.median(groups.get((mode, size, "pulsar-cpp"), [0]))
-        ratio = f"{neutron / cpp:.2f}x" if cpp else "-"
-        print(f"{mode:<18} {size:>6}  {neutron:>14,.0f}  {cpp:>17,.0f}  {ratio:>7}")
+        medians = {
+            client: statistics.median(groups[(mode, size, client)])
+            for client in CLIENTS
+            if (mode, size, client) in groups
+        }
+        line = f"{mode:<18} {size:>6}"
+        for client in CLIENTS:
+            value = medians.get(client)
+            line += f"  {value:>18,.0f}" if value else f"  {'-':>18}"
+        neutron = medians.get("neutron")
+        for client in CLIENTS[1:]:
+            other = medians.get(client)
+            ratio = f"{neutron / other:.2f}x" if neutron and other else "-"
+            line += f"  {ratio:>7}"
+        print(line)
 
 
 if __name__ == "__main__":

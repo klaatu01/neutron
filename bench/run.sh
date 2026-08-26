@@ -8,6 +8,7 @@
 #   cargo build --release --features bench --examples
 #   g++ -O2 -std=c++17 -o bench/cpp_producer bench/bench_producer.cc -lpulsar
 #   g++ -O2 -std=c++17 -o bench/cpp_consumer bench/bench_consumer.cc -lpulsar
+#   (cd bench/pulsar-rs && cargo build --release)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,6 +26,8 @@ NEUTRON_PRODUCER=./target/release/examples/bench_producer
 NEUTRON_CONSUMER=./target/release/examples/bench_consumer
 CPP_PRODUCER=./bench/cpp_producer
 CPP_CONSUMER=./bench/cpp_consumer
+RS_PRODUCER=./bench/pulsar-rs/target/release/producer
+RS_CONSUMER=./bench/pulsar-rs/target/release/consumer
 
 : > "$OUT"
 port=$PORT_BASE
@@ -60,6 +63,7 @@ for size in $SIZES; do
             configs=(
                 "neutron|$NEUTRON_PRODUCER|SIZE=$size BATCH=0|"
                 "pulsar-cpp|$CPP_PRODUCER|SIZE=$size BATCHING=0|"
+                "pulsar-rs|$RS_PRODUCER|SIZE=$size BATCH=0|"
             )
             ;;
         producer-batched)
@@ -69,12 +73,14 @@ for size in $SIZES; do
             configs=(
                 "neutron|$NEUTRON_PRODUCER|SIZE=$size BATCH=500|"
                 "pulsar-cpp|$CPP_PRODUCER|SIZE=$size BATCHING=1|"
+                "pulsar-rs|$RS_PRODUCER|SIZE=$size BATCH=500|"
             )
             ;;
         consumer)
             configs=(
                 "neutron|$NEUTRON_CONSUMER|SIZE=$size|FEED_COUNT=$run_count FEED_SIZE=$size"
                 "pulsar-cpp|$CPP_CONSUMER|SIZE=$size|FEED_COUNT=$run_count FEED_SIZE=$size"
+                "pulsar-rs|$RS_CONSUMER|SIZE=$size|FEED_COUNT=$run_count FEED_SIZE=$size"
             )
             ;;
         esac

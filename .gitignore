@@ -2,3 +2,4 @@
 **/Cargo.lock
 bench/cpp_producer
 bench/cpp_consumer
+bench/pulsar-rs/target/
