@@ -36,6 +36,8 @@ half-open connections.
 
 A design review of this architecture (and the dispatch-loop design it
 replaced) lives in [`docs/architecture-review.html`](docs/architecture-review.html).
+The gap between here and a production-mature client is written down in
+[`ROADMAP.md`](ROADMAP.md).
 
 ## Installation
 
