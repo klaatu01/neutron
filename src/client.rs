@@ -236,7 +236,7 @@ impl PulsarClient for Client {
             producer_name: self.client_name.clone(),
             producer_id: self.client_id,
             sequence_id: self.sequence_id.fetch_add(1, Ordering::SeqCst),
-            payload,
+            payload: payload.into(),
         })
         .await
     }
@@ -250,7 +250,7 @@ impl PulsarClient for Client {
             producer_name: self.client_name.clone(),
             producer_id: self.client_id,
             sequence_id: self.sequence_id.fetch_add(1, Ordering::SeqCst),
-            payloads,
+            payloads: payloads.into_iter().map(Into::into).collect(),
         })
         .await
     }

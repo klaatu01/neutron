@@ -1,9 +1,4 @@
-use std::io::Cursor;
-
-use bytes::{Buf, BufMut};
-use nom::bytes::streaming::take;
-use nom::number::streaming::{be_u16, be_u32};
-use nom::IResult;
+use bytes::{Buf, BufMut, Bytes};
 use protobuf::Message as _;
 
 use crate::message::proto::pulsar::{BaseCommand, MessageMetadata};
@@ -11,64 +6,29 @@ use crate::{error::NeutronError, message::MessageCommand};
 
 pub struct Codec;
 
-struct CommandFrame<'a> {
-    #[allow(dead_code)]
-    pub(crate) total_size: u32,
-    #[allow(dead_code)]
-    command_size: u32,
-    command: &'a [u8],
-}
-
-fn command_frame(bytes: &[u8]) -> IResult<&[u8], CommandFrame> {
-    let (bytes, total_size) = be_u32::<_, nom::error::Error<&[u8]>>(bytes).unwrap();
-    let (bytes, command_size) = be_u32::<_, nom::error::Error<&[u8]>>(bytes).unwrap();
-    let (bytes, command) = take::<_, _, nom::error::Error<&[u8]>>(command_size)(bytes).unwrap();
-    Ok((
-        bytes,
-        CommandFrame {
-            total_size,
-            command_size,
-            command,
-        },
-    ))
-}
-
-struct PayloadFrame<'a> {
-    #[allow(dead_code)]
-    magic_number: u16,
-    #[allow(dead_code)]
-    checksum: u32,
-    #[allow(dead_code)]
-    metadata_size: u32,
-    metadata: &'a [u8],
-}
+/// Wire layout:
+///
+/// ```text
+/// [total_size: u32][command_size: u32][command]
+///     ... optionally followed by ...
+/// [magic: u16][checksum: u32][metadata_size: u32][metadata][payload]
+/// ```
+///
+/// `total_size` counts everything after itself.
+const FRAME_HEADER: usize = 8; // total_size + command_size
+const PAYLOAD_HEADER: usize = 10; // magic + checksum + metadata_size
+const MAGIC: u16 = 0x0e01;
 
 #[derive(Debug, Clone)]
 pub struct Payload {
     /// message metadata added by Pulsar
     pub metadata: MessageMetadata,
-    /// raw message data
-    pub data: Vec<u8>,
-}
-
-fn payload_frame(bytes: &[u8]) -> IResult<&[u8], PayloadFrame> {
-    let (bytes, magic_number) = be_u16(bytes)?;
-    let (bytes, checksum) = be_u32(bytes)?;
-    let (bytes, metadata_size) = be_u32(bytes)?;
-    let (bytes, metadata) = take(metadata_size)(bytes)?;
-    Ok((
-        bytes,
-        PayloadFrame {
-            magic_number,
-            checksum,
-            metadata_size,
-            metadata,
-        },
-    ))
+    /// raw message data — a zero-copy slice of the read buffer; cloning
+    /// it is a reference-count bump, not a memcpy
+    pub data: Bytes,
 }
 
 impl From<std::io::Error> for NeutronError {
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(_err: std::io::Error) -> Self {
         NeutronError::Io
     }
@@ -76,42 +36,54 @@ impl From<std::io::Error> for NeutronError {
 
 impl tokio_util::codec::Encoder<MessageCommand> for Codec {
     type Error = NeutronError;
+
     fn encode(
         &mut self,
         item: MessageCommand,
         dst: &mut bytes::BytesMut,
     ) -> Result<(), Self::Error> {
-        let mut buf = Vec::new();
-        let command_bytes = item.command.write_to_bytes().unwrap();
-        let command_size = item.command.compute_size() as u32;
-        let header_size = if item.payload.is_some() { 18 } else { 8 };
-        let metadata_size = item
-            .payload
-            .as_ref()
-            .map_or(0, |p| p.metadata.compute_size() as u32);
-        let payload_size = item.payload.as_ref().map_or(0, |p| p.data.len() as u32);
-        let total_size = command_size + metadata_size + payload_size + header_size - 4;
+        let command_bytes = item
+            .command
+            .write_to_bytes()
+            .map_err(|_| NeutronError::EncodeFailed)?;
+        let command_size = command_bytes.len() as u32;
 
-        buf.put_u32(total_size);
-        buf.put_u32(command_size);
-        buf.put_slice(&command_bytes);
+        match item.payload {
+            None => {
+                dst.reserve(FRAME_HEADER + command_bytes.len());
+                dst.put_u32(4 + command_size);
+                dst.put_u32(command_size);
+                dst.put_slice(&command_bytes);
+            }
+            Some(payload) => {
+                let metadata_bytes = payload
+                    .metadata
+                    .write_to_bytes()
+                    .map_err(|_| NeutronError::EncodeFailed)?;
+                let metadata_size = metadata_bytes.len() as u32;
+                let total_size = 4
+                    + command_size
+                    + PAYLOAD_HEADER as u32
+                    + metadata_size
+                    + payload.data.len() as u32;
 
-        if let Some(payload) = item.payload {
-            let mut payload_buf = Vec::new();
-            payload_buf.put_u16(0x0e01);
-            payload_buf.put_u32(0);
-            payload_buf.put_u32(payload.metadata.compute_size() as u32);
-            payload_buf.put_slice(&payload.metadata.write_to_bytes().unwrap());
-            payload_buf.put_slice(&payload.data);
-            let checksum = crc32c::crc32c(&payload_buf[6..]);
-            payload_buf[2..6].copy_from_slice(&checksum.to_be_bytes());
-            buf.put_slice(&payload_buf);
-        };
+                dst.reserve(4 + total_size as usize);
+                dst.put_u32(total_size);
+                dst.put_u32(command_size);
+                dst.put_slice(&command_bytes);
 
-        if dst.remaining_mut() < buf.len() {
-            dst.reserve(buf.len());
+                dst.put_u16(MAGIC);
+                let checksum_at = dst.len();
+                dst.put_u32(0); // patched below
+                let checksummed_from = dst.len();
+                dst.put_u32(metadata_size);
+                dst.put_slice(&metadata_bytes);
+                dst.put_slice(&payload.data);
+
+                let checksum = crc32c::crc32c(&dst[checksummed_from..]);
+                dst[checksum_at..checksum_at + 4].copy_from_slice(&checksum.to_be_bytes());
+            }
         }
-        dst.put_slice(&buf);
         Ok(())
     }
 }
@@ -124,35 +96,44 @@ impl tokio_util::codec::Decoder for Codec {
         if src.len() < 4 {
             return Ok(None);
         }
-        let mut buf = Cursor::new(src);
-        let message_size = buf.get_u32() as usize + 4;
-        let src = buf.into_inner();
-        if src.len() >= message_size {
-            let (bytes, command_frame) = command_frame(&src[..message_size]).unwrap();
-            let command = BaseCommand::parse_from_bytes(command_frame.command).unwrap();
-
-            let (bytes, payload_frame) = match bytes.is_empty() {
-                false => payload_frame(bytes)
-                    .map(|(bytes, p)| (bytes, Some(p)))
-                    .unwrap_or((bytes, None)),
-                true => (bytes, None),
-            };
-
-            let payload = payload_frame.as_ref().map(|p| {
-                let metadata = MessageMetadata::parse_from_bytes(p.metadata).unwrap();
-                Payload {
-                    metadata,
-                    data: bytes.to_vec(),
-                }
-            });
-
-            src.advance(message_size);
-
-            let message = MessageCommand { command, payload };
-
-            Ok(Some(message))
-        } else {
-            Ok(None)
+        let total_size = u32::from_be_bytes(src[0..4].try_into().unwrap()) as usize;
+        let frame_size = total_size + 4;
+        if src.len() < frame_size {
+            src.reserve(frame_size - src.len());
+            return Ok(None);
         }
+
+        // The whole frame leaves the read buffer without copying; payload
+        // bytes below are slices of this one allocation.
+        let frame: Bytes = src.split_to(frame_size).freeze();
+
+        let command_size =
+            u32::from_be_bytes(frame[4..FRAME_HEADER].try_into().unwrap()) as usize;
+        let command_end = FRAME_HEADER + command_size;
+        if command_end > frame.len() {
+            return Err(NeutronError::DecodeFailed);
+        }
+        let command = BaseCommand::parse_from_bytes(&frame[FRAME_HEADER..command_end])
+            .map_err(|_| NeutronError::DecodeFailed)?;
+
+        let payload = if command_end < frame.len() {
+            let rest = &frame[command_end..];
+            if rest.len() < PAYLOAD_HEADER {
+                return Err(NeutronError::DecodeFailed);
+            }
+            let metadata_size = u32::from_be_bytes(rest[6..10].try_into().unwrap()) as usize;
+            let metadata_end = PAYLOAD_HEADER + metadata_size;
+            if metadata_end > rest.len() {
+                return Err(NeutronError::DecodeFailed);
+            }
+            let metadata = MessageMetadata::parse_from_bytes(&rest[PAYLOAD_HEADER..metadata_end])
+                .map_err(|_| NeutronError::DecodeFailed)?;
+            let data = frame.slice(command_end + metadata_end..);
+            Some(Payload { metadata, data })
+        } else {
+            None
+        };
+
+        Ok(Some(MessageCommand { command, payload }))
     }
 }

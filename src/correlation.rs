@@ -238,7 +238,7 @@ mod tests {
             producer_name: format!("producer-{}", producer_id),
             producer_id,
             sequence_id,
-            payload: Vec::new(),
+            payload: bytes::Bytes::new(),
         })
     }
 

@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use chrono::Utc;
 use nom::{
     bytes::streaming::take,
@@ -360,20 +360,20 @@ pub enum Send {
         producer_name: String,
         producer_id: u64,
         sequence_id: u64,
-        payload: Vec<u8>,
+        payload: Bytes,
     },
     Batch {
         producer_name: String,
         producer_id: u64,
         sequence_id: u64,
-        payloads: Vec<Vec<u8>>,
+        payloads: Vec<Bytes>,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct BatchedPayload {
     pub metadata: SingleMessageMetadata,
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
 }
 
 impl Send {
@@ -405,9 +405,9 @@ impl Send {
         }
     }
 
-    pub fn payload(self) -> Vec<u8> {
+    pub fn payload(self) -> Bytes {
         match self {
-            Send::Single { payload, .. } => payload.clone(),
+            Send::Single { payload, .. } => payload,
             Send::Batch { payloads, .. } => {
                 let mut buffer = BytesMut::new();
 
@@ -421,7 +421,7 @@ impl Send {
                     buffer.put_slice(&payload);
                 }
 
-                buffer.to_vec()
+                buffer.freeze()
             }
         }
     }
@@ -594,7 +594,7 @@ impl TryFrom<MessageCommand> for AckReciept {
 pub struct SingleMessage {
     pub consumer_id: u64,
     pub message_id: MessageIdData,
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
 }
 
 #[derive(Debug, Clone)]
@@ -630,8 +630,7 @@ impl TryFrom<Inbound> for Message {
     }
 }
 
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-fn batched_payload(i: &[u8]) -> IResult<&[u8], BatchedPayload> {
+fn batched_payload(i: &[u8]) -> IResult<&[u8], (SingleMessageMetadata, &[u8])> {
     let (i, metadata_size) = be_u32(i)?;
     let (i, metadata) = verify(
         map_res(take(metadata_size), SingleMessageMetadata::parse_from_bytes),
@@ -641,23 +640,24 @@ fn batched_payload(i: &[u8]) -> IResult<&[u8], BatchedPayload> {
 
     let (i, payload) = take(metadata.payload_size() as u32)(i)?;
 
-    Ok((
-        i,
-        BatchedPayload {
-            metadata,
-            payload: payload.to_vec(),
-        },
-    ))
+    Ok((i, (metadata, payload)))
 }
 
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 pub(crate) fn parse_batched_message(
     count: u32,
-    payload: &[u8],
+    payload: &Bytes,
 ) -> Result<Vec<BatchedPayload>, NeutronError> {
-    let (_, result) = nom::multi::count(batched_payload, count as usize)(payload)
+    let (_, result) = nom::multi::count(batched_payload, count as usize)(payload.as_ref())
         .map_err(|_| NeutronError::DecodeFailed)?;
-    Ok(result)
+    // The parsed slices point into `payload`; slice_ref recovers zero-copy
+    // Bytes handles to the same allocation.
+    Ok(result
+        .into_iter()
+        .map(|(metadata, data)| BatchedPayload {
+            metadata,
+            payload: payload.slice_ref(data),
+        })
+        .collect())
 }
 
 impl TryFrom<MessageCommand> for Message {
@@ -666,8 +666,14 @@ impl TryFrom<MessageCommand> for Message {
     fn try_from(value: MessageCommand) -> Result<Self, Self::Error> {
         match value.command.type_() {
             proto::pulsar::base_command::Type::MESSAGE => {
-                let message_id = value.command.message.message_id.clone().unwrap();
-                let payload = value.payload.as_ref().unwrap();
+                let message_id = value
+                    .command
+                    .message
+                    .message_id
+                    .clone()
+                    .into_option()
+                    .ok_or(NeutronError::DecodeFailed)?;
+                let payload = value.payload.as_ref().ok_or(NeutronError::DecodeFailed)?;
                 let metadata = payload.metadata.clone();
                 let payload = payload.data.clone();
                 let consumer_id = value.command.message.consumer_id();
@@ -1075,6 +1081,7 @@ mod test {
             assert_eq!(payload.metadata.producer_name(), "standalone-0-3");
             assert_eq!(payload.metadata.sequence_id(), 8);
             assert_eq!(payload.metadata.publish_time(), 1533850624062);
+            assert_eq!(payload.data.as_ref(), b"hello-pulsar-8");
         }
     }
 
@@ -1098,6 +1105,7 @@ mod test {
             assert_eq!(payload.metadata.producer_name(), "test-producer");
             assert_eq!(payload.metadata.sequence_id(), 0);
             assert_eq!(payload.metadata.publish_time(), 1707141100777);
+            assert_eq!(payload.data.as_ref(), b"data-0");
         }
     }
 
@@ -1131,12 +1139,22 @@ mod test {
                     metadata.set_publish_time(1533850624062);
                     metadata
                 },
-                data: vec![0, 1, 2, 3, 4, 5, 6, 7],
+                data: bytes::Bytes::from_static(&[0, 1, 2, 3, 4, 5, 6, 7]),
             }),
         };
         let mut buf = BytesMut::new();
-        Codec.encode(input, &mut buf).unwrap();
-        let _decoded = Codec.decode(&mut buf).unwrap();
+        Codec.encode(input.clone(), &mut buf).unwrap();
+        let decoded = Codec.decode(&mut buf).unwrap().unwrap();
+
+        assert_eq!(decoded.command.type_(), input.command.type_());
+        let decoded_payload = decoded.payload.unwrap();
+        let input_payload = input.payload.unwrap();
+        assert_eq!(
+            decoded_payload.metadata.producer_name(),
+            input_payload.metadata.producer_name()
+        );
+        assert_eq!(decoded_payload.data, input_payload.data);
+        assert!(buf.is_empty(), "decode must consume the whole frame");
     }
 
     #[test]

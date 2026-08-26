@@ -87,6 +87,7 @@ where
                 #[cfg(not(feature = "json"))]
                 let message: Message<T> = Message {
                     payload: payload
+                        .to_vec()
                         .try_into()
                         .map_err(|_| NeutronError::DeserializationFailed)?,
                     ack: message_id.clone().into(),
@@ -107,6 +108,7 @@ where
                         #[cfg(not(feature = "json"))]
                         let message: T = m
                             .payload
+                            .to_vec()
                             .try_into()
                             .map_err(|_| NeutronError::DeserializationFailed)
                             .unwrap();
@@ -517,7 +519,7 @@ mod tests {
         client.expect_next_message().times(3).returning(|| {
             Ok(crate::message::Message::Single(
                 crate::message::SingleMessage {
-                    payload: vec![104, 101, 108, 108, 111, 95, 119, 111, 114, 108, 100],
+                    payload: vec![104, 101, 108, 108, 111, 95, 119, 111, 114, 108, 100].into(),
                     message_id: MessageIdData::new(),
                     consumer_id: 0,
                 },
