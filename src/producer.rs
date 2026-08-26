@@ -51,12 +51,11 @@ where
         self.client.producer(&self.config.topic).await
     }
 
-    fn producer_id(&self) -> u64 {
+    pub fn producer_id(&self) -> u64 {
         self.client.client_id()
     }
 
-    #[allow(dead_code)]
-    fn producer_name(&self) -> &str {
+    pub fn producer_name(&self) -> &str {
         self.client.client_name()
     }
 

@@ -1,5 +1,6 @@
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
@@ -7,9 +8,26 @@ use crate::broker_address::BrokerAddress;
 use crate::client::Client;
 use crate::connection::{ConnectionHandle, PulsarConnection};
 use crate::error::NeutronError;
-use crate::message::Connect;
-use crate::registry::{ConnectionSlot, Registry, INBOX_CAPACITY};
+use crate::message::{Connect, Flow, Subscribe};
+use crate::registry::{ClientSession, ConnectionSlot, Registry, INBOX_CAPACITY};
 use crate::AuthenticationPlugin;
+
+/// How long a client operation waits for a reconnecting slot before its
+/// transient failure is surfaced.
+pub(crate) const RECONNECT_WAIT: Duration = Duration::from_secs(15);
+
+/// Reconnect backoff: exponential from BASE to CAP, jittered by ±50% so a
+/// fleet of clients does not stampede a recovering broker.
+const BACKOFF_BASE: Duration = Duration::from_millis(200);
+const BACKOFF_CAP: Duration = Duration::from_secs(30);
+
+fn jittered(duration: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.subsec_nanos())
+        .unwrap_or(0);
+    duration.mul_f64(0.5 + (nanos % 1000) as f64 / 1000.0)
+}
 
 #[derive(Clone)]
 pub struct PulsarConfig {
@@ -39,11 +57,18 @@ pub(crate) struct PulsarInner {
     /// Serializes dialing so concurrent registrations to the same broker
     /// produce one connection, not two.
     dial_lock: tokio::sync::Mutex<()>,
+    /// Request ids must be unique across every client sharing a
+    /// connection — responses are correlated by them.
+    request_id_generator: Arc<AtomicU64>,
 }
 
 impl PulsarInner {
     pub(crate) fn auth_plugin(&self) -> Option<Arc<dyn AuthenticationPlugin + Send + Sync>> {
         self.auth_plugin.clone()
+    }
+
+    pub(crate) fn next_request_id(&self) -> u64 {
+        self.request_id_generator.fetch_add(1, Ordering::SeqCst)
     }
 
     async fn connect_command(&self, broker_address: &BrokerAddress) -> Result<Connect, NeutronError> {
@@ -76,54 +101,156 @@ impl PulsarInner {
     }
 
     /// The slot for `broker_address`, dialing a fresh connection if none
-    /// is live. Clients keep the slot; the handle inside it can change.
+    /// exists yet. Clients keep the slot; the handle inside it changes as
+    /// the supervisor replaces dead connections. A slot that is currently
+    /// down is returned as-is — `wait_ready` is how callers ride out a
+    /// reconnect in progress.
     pub(crate) async fn ensure_connection(
         self: &Arc<Self>,
         broker_address: &BrokerAddress,
     ) -> Result<Arc<ConnectionSlot>, NeutronError> {
         if let Some(slot) = self.registry.get_slot(broker_address) {
-            if slot.is_ready() {
-                return Ok(slot);
-            }
+            return Ok(slot);
         }
 
         let _dialing = self.dial_lock.lock().await;
         // Someone else may have dialed while this task waited its turn.
         if let Some(slot) = self.registry.get_slot(broker_address) {
-            if slot.is_ready() {
-                return Ok(slot);
-            }
+            return Ok(slot);
         }
 
+        // The initial dial fails fast to the caller; only established
+        // slots get a supervisor and reconnect semantics.
         let handle = self.establish(broker_address).await?;
         let slot = ConnectionSlot::new(broker_address.clone(), handle);
         self.registry.insert_slot(slot.clone());
+        tokio::spawn(supervise(Arc::downgrade(self), slot.clone()));
         Ok(slot)
     }
 
-    /// Called by a connection actor as it dies. Closes the slot (unless a
-    /// replacement already took it over) and disconnects the clients that
-    /// were bound to it, so nothing blocks on a connection that no longer
-    /// exists.
+    /// Called by a connection actor as it dies. Marks the slot down
+    /// (unless a replacement already took it over), which wakes the
+    /// supervisor to reconnect and replay.
     pub(crate) async fn connection_closed(
         &self,
         broker_address: &BrokerAddress,
-        dead: std::sync::Weak<ConnectionHandle>,
+        dead: Weak<ConnectionHandle>,
     ) {
         if let Some(slot) = self.registry.get_slot(broker_address) {
-            if !slot.set_closed_if_current(&dead) {
-                // A newer connection owns this slot; nothing to do.
-                return;
+            if slot.set_down_if_current(&dead) {
+                log::warn!(
+                    "Connection to {} lost; supervisor is reconnecting",
+                    broker_address
+                );
             }
-            self.registry.remove_slot(broker_address);
         }
-        let dropped = self.registry.disconnect_clients_of(broker_address);
-        if dropped > 0 {
-            log::warn!(
-                "Connection to {} closed; {} client(s) disconnected",
-                broker_address,
-                dropped
-            );
+    }
+
+    /// Rebuild every session bound to `broker_address` on a fresh
+    /// connection: rebind each client's existing inbox, re-subscribe
+    /// consumers and re-issue their flow credit, re-register producers.
+    /// Consumers blocked in `next_message` never notice beyond latency —
+    /// their inbox channel is the same one, now fed by the new reader.
+    async fn replay_sessions(&self, broker_address: &BrokerAddress, handle: &ConnectionHandle) {
+        for (id, inbox_tx, session) in self.registry.clients_on(broker_address) {
+            if let Err(e) = self.replay_client(id, inbox_tx, session, handle).await {
+                log::error!("Failed to replay client {} after reconnect: {}", id, e);
+            }
+        }
+    }
+
+    async fn replay_client(
+        &self,
+        id: u64,
+        inbox_tx: mpsc::Sender<crate::message::Inbound>,
+        session: ClientSession,
+        handle: &ConnectionHandle,
+    ) -> Result<(), NeutronError> {
+        handle.bind(id, inbox_tx).await?;
+        match session {
+            ClientSession::Unregistered => {}
+            ClientSession::Consumer {
+                topic,
+                subscription,
+                sub_type,
+                permits,
+            } => {
+                handle
+                    .request(
+                        Subscribe {
+                            topic,
+                            subscription,
+                            consumer_id: id,
+                            request_id: self.next_request_id(),
+                            sub_type,
+                        }
+                        .into(),
+                    )
+                    .await?;
+                if permits > 0 {
+                    handle
+                        .send(
+                            Flow {
+                                consumer_id: id,
+                                message_permits: permits,
+                            }
+                            .into(),
+                        )
+                        .await?;
+                }
+                log::info!("Replayed consumer {} onto {}", id, handle.broker_address);
+            }
+            ClientSession::Producer {
+                topic,
+                producer_name,
+            } => {
+                handle
+                    .request(
+                        crate::message::Producer {
+                            producer_id: id,
+                            producer_name: Some(producer_name),
+                            topic,
+                            request_id: self.next_request_id(),
+                        }
+                        .into(),
+                    )
+                    .await?;
+                log::info!("Replayed producer {} onto {}", id, handle.broker_address);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One supervisor per broker slot: sleeps until the connection dies, then
+/// re-establishes it under jittered exponential backoff and replays every
+/// session that was bound to it. Exits when the Pulsar instance is gone.
+async fn supervise(inner: Weak<PulsarInner>, slot: Arc<ConnectionSlot>) {
+    loop {
+        slot.wait_down().await;
+
+        let mut backoff = BACKOFF_BASE;
+        loop {
+            let Some(inner) = inner.upgrade() else { return };
+            match inner.establish(&slot.broker_address).await {
+                Ok(handle) => {
+                    slot.set_ready(handle.clone());
+                    inner.replay_sessions(&slot.broker_address, &handle).await;
+                    log::info!("Reconnected to {}", slot.broker_address);
+                    break;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Reconnect to {} failed ({}); retrying in {:?}",
+                        slot.broker_address,
+                        e,
+                        backoff
+                    );
+                }
+            }
+            drop(inner);
+            tokio::time::sleep(jittered(backoff)).await;
+            backoff = (backoff * 2).min(BACKOFF_CAP);
         }
     }
 }
@@ -147,6 +274,7 @@ impl Pulsar {
             auth_plugin: self.auth_plugin.map(Arc::from),
             registry: Registry::new(),
             dial_lock: tokio::sync::Mutex::new(()),
+            request_id_generator: Arc::new(AtomicU64::new(0)),
         }))
     }
 }
@@ -193,7 +321,6 @@ impl PulsarBuilder {
 
 pub struct PulsarManager {
     client_id_generator: AtomicU64,
-    request_id_generator: Arc<AtomicU64>,
     inner: Arc<PulsarInner>,
 }
 
@@ -201,7 +328,6 @@ impl PulsarManager {
     pub(crate) fn new(inner: Arc<PulsarInner>) -> Self {
         Self {
             client_id_generator: AtomicU64::new(0),
-            request_id_generator: Arc::new(AtomicU64::new(0)),
             inner,
         }
     }
@@ -211,11 +337,8 @@ impl PulsarManager {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Request ids must be unique across every client sharing a
-    /// connection — responses are correlated by them — so allocation is
-    /// owned here rather than per client.
     pub(crate) fn request_id_generator(&self) -> Arc<AtomicU64> {
-        self.request_id_generator.clone()
+        self.inner.request_id_generator.clone()
     }
 
     /// Create a client bound to the base broker: ensure the connection is
@@ -231,7 +354,10 @@ impl PulsarManager {
         let slot = self.inner.ensure_connection(&base).await?;
 
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
-        slot.handle()?.bind(client_id, inbox_tx.clone()).await?;
+        slot.wait_ready(RECONNECT_WAIT)
+            .await?
+            .bind(client_id, inbox_tx.clone())
+            .await?;
         self.inner
             .registry
             .add_client(client_id, inbox_tx, base.clone());

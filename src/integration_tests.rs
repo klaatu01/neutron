@@ -250,10 +250,12 @@ async fn lookup_moves_the_client_to_the_owning_broker() {
     assert_eq!(message.payload, Data("delivered".into()));
 }
 
-/// When the connection dies (and nothing replaces it yet), a blocked
-/// consumer resolves to an error instead of hanging forever.
+/// The crown test of supervision: kill the connection at the socket and
+/// the supervisor must reconnect, re-handshake, replay the subscription
+/// and flow credit, and resume delivery into the same inbox the consumer
+/// was already blocked on.
 #[tokio::test]
-async fn connection_death_fails_blocked_consumers() {
+async fn consumer_recovers_after_connection_loss() {
     let broker = FakeBroker::start().await;
     let pulsar = crate::PulsarBuilder::new()
         .with_config(broker.config())
@@ -262,18 +264,97 @@ async fn connection_death_fails_blocked_consumers() {
 
     let consumer = within(
         ConsumerBuilder::new()
-            .with_topic("t")
-            .with_subscription("s")
-            .with_consumer_name("c")
+            .with_topic("resilient-topic")
+            .with_subscription("sub")
+            .with_consumer_name("survivor")
             .connect(&pulsar),
     )
     .await
     .unwrap();
 
-    let pending = tokio::spawn(async move { consumer.next_message().await.map(|m: crate::Message<Data>| m.payload) });
+    // Drain the initial session's events.
+    within(broker.expect_event(BrokerEvent::Connect)).await;
+    within(broker.wait_for(|e| matches!(e, BrokerEvent::Flow { .. }))).await;
+
+    // Park the consumer on its inbox, then cut the wire.
+    let consumer = std::sync::Arc::new(consumer);
+    let blocked = tokio::spawn({
+        let consumer = consumer.clone();
+        async move {
+            consumer
+                .next_message()
+                .await
+                .map(|message: crate::Message<Data>| message.payload)
+        }
+    });
     tokio::time::sleep(Duration::from_millis(100)).await;
     broker.kill_connections();
 
-    let result = within(pending).await.unwrap();
-    assert!(result.is_err(), "expected Disconnected, got {:?}", result);
+    // The supervisor re-establishes and replays the whole session.
+    within(broker.expect_event(BrokerEvent::Connect)).await;
+    let resubscribed =
+        within(broker.wait_for(|e| matches!(e, BrokerEvent::Subscribe { .. }))).await;
+    assert_eq!(
+        resubscribed,
+        BrokerEvent::Subscribe {
+            consumer_id: consumer.consumer_id(),
+            topic: "resilient-topic".into(),
+            subscription: "sub".into(),
+        }
+    );
+    let reflowed = within(broker.wait_for(|e| matches!(e, BrokerEvent::Flow { .. }))).await;
+    assert_eq!(
+        reflowed,
+        BrokerEvent::Flow {
+            consumer_id: consumer.consumer_id(),
+            permits: 500
+        }
+    );
+
+    // Delivery resumes into the very same blocked call.
+    broker.push_message(consumer.consumer_id(), 7, b"survived");
+    let payload = within(blocked).await.unwrap().unwrap();
+    assert_eq!(payload, Data("survived".into()));
+
+    // The recovered session acks end to end.
+    broker.push_message(consumer.consumer_id(), 8, b"again");
+    let message: crate::Message<Data> = within(consumer.next_message()).await.unwrap();
+    within(consumer.ack(&message.ack)).await.unwrap();
+}
+
+/// A publish that lands in the outage window is retried against the
+/// replacement connection instead of surfacing a transient error.
+#[tokio::test]
+async fn producer_send_retries_across_reconnect() {
+    let broker = FakeBroker::start().await;
+    let pulsar = crate::PulsarBuilder::new()
+        .with_config(broker.config())
+        .build()
+        .run();
+
+    let producer = within(
+        ProducerBuilder::new()
+            .with_producer_name("persistent")
+            .with_topic("topic")
+            .connect(&pulsar),
+    )
+    .await
+    .unwrap();
+    within(broker.wait_for(|e| matches!(e, BrokerEvent::Producer { .. }))).await;
+
+    broker.kill_connections();
+    // Publish immediately into the outage; the retry loop must carry it
+    // over the reconnect (same sequence id, so broker-side dedup holds).
+    within(producer.send(Data("through-the-gap".into())))
+        .await
+        .unwrap();
+
+    within(broker.expect_event(BrokerEvent::Connect)).await;
+    let replayed = within(broker.wait_for(|e| matches!(e, BrokerEvent::Producer { .. }))).await;
+    assert!(matches!(
+        replayed,
+        BrokerEvent::Producer { producer_id, .. } if producer_id == producer.producer_id()
+    ));
+    let sent = within(broker.wait_for(|e| matches!(e, BrokerEvent::Send { .. }))).await;
+    assert!(matches!(sent, BrokerEvent::Send { sequence_id: 0, .. }));
 }

@@ -17,12 +17,39 @@ pub enum NeutronError {
     PulsarError(String),
 }
 
+/// Whether an operation that failed this way may be retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retryability {
+    /// The failure is tied to a connection's lifetime; the same request
+    /// can be reissued once a connection is live again.
+    Transient,
+    /// Retrying would fail the same way (protocol, serialization, or
+    /// broker-rejected errors).
+    Permanent,
+}
+
 impl NeutronError {
     pub fn is_disconnect(&self) -> bool {
         matches!(
             self,
             NeutronError::Disconnected | NeutronError::ChannelTerminated
         )
+    }
+
+    /// The retry decision belongs on the error type, not at each call
+    /// site: one policy serves every path.
+    ///
+    /// `OperationTimeout` is deliberately Permanent for automatic
+    /// retries: the request may still be executing broker-side, so only
+    /// the application can decide whether reissuing is safe.
+    pub fn retryability(&self) -> Retryability {
+        match self {
+            NeutronError::Disconnected
+            | NeutronError::ChannelTerminated
+            | NeutronError::ConnectionFailed
+            | NeutronError::Io => Retryability::Transient,
+            _ => Retryability::Permanent,
+        }
     }
 }
 

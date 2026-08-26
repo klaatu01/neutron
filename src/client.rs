@@ -12,15 +12,29 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::{
     broker_address::BrokerAddress,
+    error::Retryability,
     message::{
         self, proto::pulsar::MessageIdData, AckReciept, Connected, Inbound, LookupResponseType,
         LookupTopic, LookupTopicResponse, Outbound, ProducerSuccess, SendReceipt, Subscribe,
         Success,
     },
-    pulsar::PulsarInner,
+    pulsar::{PulsarInner, RECONNECT_WAIT},
     registry::{ClientSession, ConnectionSlot},
     NeutronError,
 };
+
+/// Attempts per operation across connection replacements: the original
+/// try plus retries after waiting out a reconnect.
+const MAX_ATTEMPTS: usize = 3;
+
+/// Whether this failure may be reissued automatically. Only failures
+/// from before wire commitment (no live handle, the queue refused the
+/// frame) or from a connection that died with the request in flight
+/// qualify; the latter is safe under Pulsar's at-least-once semantics
+/// because the retry reuses the same sequence/request id.
+fn retryable(error: &NeutronError, attempt: usize) -> bool {
+    attempt + 1 < MAX_ATTEMPTS && error.retryability() == Retryability::Transient
+}
 
 /// How many broker hops a topic lookup may take (base -> proxy or owner
 /// -> authoritative answer) before giving up.
@@ -113,9 +127,28 @@ impl Client {
     where
         Request: Into<Outbound>,
     {
-        self.current_slot().handle()?.send(command.into()).await
+        let outbound = command.into();
+        let slot = self.current_slot();
+        for attempt in 0.. {
+            let result = match slot.handle() {
+                Ok(handle) => handle.send(outbound.clone()).await,
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) if retryable(&e, attempt) => {
+                    slot.wait_ready(RECONNECT_WAIT).await?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
     }
 
+    /// Issue a request and hand back a future for its response. The
+    /// returned future owns the retry loop: a transient failure waits for
+    /// the slot's replacement connection and reissues the same command —
+    /// same request id, same sequence id — up to `MAX_ATTEMPTS`.
     pub(crate) async fn send_command_and_resolve<Request, Response>(
         &self,
         command: Request,
@@ -124,24 +157,22 @@ impl Client {
         Request: Into<Outbound>,
         Response: TryFrom<Inbound> + Send + 'static,
     {
-        let rx = self
-            .current_slot()
-            .handle()?
-            .request_deferred(command.into())
-            .await?;
+        let outbound = command.into();
+        let slot = self.current_slot();
 
         Ok(Box::pin(async move {
-            match rx.await {
-                Ok(Ok(inbound)) => Response::try_from(inbound).map_err(|_| {
-                    log::error!("Received a response of the wrong type");
-                    NeutronError::Unresolvable
-                }),
-                Ok(Err(err)) => {
-                    log::error!("Error resolving command: {}", err);
-                    Err(err)
+            for attempt in 0.. {
+                let result = request_once::<Response>(&slot, outbound.clone()).await;
+                match result {
+                    Ok(response) => return Ok(response),
+                    Err(e) if retryable(&e, attempt) => {
+                        log::warn!("Retrying after transient failure: {}", e);
+                        slot.wait_ready(RECONNECT_WAIT).await?;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(_) => Err(NeutronError::ChannelTerminated),
             }
+            unreachable!()
         }))
     }
 
@@ -193,6 +224,25 @@ impl Client {
             let address = BrokerAddress::Direct { url: target };
             (&address != current).then_some(address)
         }
+    }
+}
+
+async fn request_once<Response>(
+    slot: &ConnectionSlot,
+    outbound: Outbound,
+) -> Result<Response, NeutronError>
+where
+    Response: TryFrom<Inbound>,
+{
+    let rx = slot.handle()?.request_deferred(outbound).await?;
+    match rx.await {
+        Ok(Ok(inbound)) => Response::try_from(inbound).map_err(|_| {
+            log::error!("Received a response of the wrong type");
+            NeutronError::Unresolvable
+        }),
+        Ok(Err(err)) => Err(err),
+        // The connection died with the request in flight.
+        Err(_) => Err(NeutronError::ChannelTerminated),
     }
 }
 

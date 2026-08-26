@@ -28,6 +28,14 @@ const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 /// flush, so syscall cost amortizes across the batch.
 const MAX_WRITE_BATCH: usize = 128;
 
+/// The writer pings on this cadence so a half-open connection is
+/// discovered instead of trusted.
+const KEEPALIVE_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// If nothing arrives for this long — pongs included — the reader
+/// declares the connection dead and lets the supervisor replace it.
+const KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// TCP and TLS streams erased behind one boxed IO type, so the connection
 /// is a single `Framed` and splits into genuine sink/stream halves.
 pub(crate) trait AsyncIo: AsyncRead + AsyncWrite + Send + Unpin {}
@@ -54,7 +62,6 @@ pub(crate) enum ReaderCtl {
 /// connection (the actor tasks own the socket), but the actor stops when
 /// the socket does.
 pub(crate) struct ConnectionHandle {
-    #[allow(dead_code)] // read by the supervisor (reconnect), which lands next
     pub(crate) broker_address: BrokerAddress,
     writer_tx: mpsc::Sender<MessageCommand>,
     reader_ctl: mpsc::Sender<ReaderCtl>,
@@ -81,16 +88,16 @@ impl ConnectionHandle {
     ) -> Result<oneshot::Receiver<Result<Inbound, NeutronError>>, NeutronError> {
         let key = CorrelationKey::of_outbound(&outbound).ok_or(NeutronError::Unresolvable)?;
         let (tx, rx) = oneshot::channel();
-        self.inflight.register(key, tx);
-        self.writer_tx
-            .send(outbound.into())
-            .await
-            .map_err(|_| NeutronError::Disconnected)?;
+        self.inflight.register(key.clone(), tx);
+        if self.writer_tx.send(outbound.into()).await.is_err() {
+            // The request never reached the wire; nothing will resolve it.
+            self.inflight.forget(&key);
+            return Err(NeutronError::Disconnected);
+        }
         Ok(rx)
     }
 
     /// Send a command and await its response.
-    #[allow(dead_code)] // used by session replay (reconnect), which lands next
     pub(crate) async fn request(&self, outbound: Outbound) -> Result<Inbound, NeutronError> {
         let rx = self.request_deferred(outbound).await?;
         rx.await.map_err(|_| NeutronError::ChannelTerminated)?
@@ -223,7 +230,15 @@ impl PulsarConnection {
 
         let (sink, stream) = self.framed.split();
 
-        tokio::spawn(run_writer(sink, writer_rx));
+        tokio::spawn({
+            let inflight = inflight.clone();
+            async move {
+                run_writer(sink, writer_rx).await;
+                // Entries registered while the reader was already gone
+                // would otherwise wait out their full deadline.
+                inflight.drain(NeutronError::Disconnected);
+            }
+        });
 
         let handle = Arc::new(ConnectionHandle {
             broker_address: broker_address.clone(),
@@ -259,10 +274,20 @@ async fn run_writer(
     mut rx: mpsc::Receiver<MessageCommand>,
 ) {
     let mut batch: Vec<MessageCommand> = Vec::with_capacity(MAX_WRITE_BATCH);
+    let mut ping = tokio::time::interval(KEEPALIVE_PING_INTERVAL);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping.reset();
     loop {
         batch.clear();
-        if rx.recv_many(&mut batch, MAX_WRITE_BATCH).await == 0 {
-            break;
+        tokio::select! {
+            received = rx.recv_many(&mut batch, MAX_WRITE_BATCH) => {
+                if received == 0 {
+                    break;
+                }
+            }
+            _ = ping.tick() => {
+                batch.push(Outbound::Ping.into());
+            }
         }
         for frame in batch.drain(..) {
             if let Err(e) = sink.feed(frame).await {
@@ -290,6 +315,9 @@ async fn run_reader(
     inner: Weak<PulsarInner>,
 ) {
     let mut routes: HashMap<u64, mpsc::Sender<Inbound>> = HashMap::new();
+    let mut last_inbound = tokio::time::Instant::now();
+    let mut keepalive = tokio::time::interval(KEEPALIVE_TIMEOUT / 3);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         // biased: binds enqueued before a subscribe are processed before
@@ -305,6 +333,12 @@ async fn run_reader(
                 }
                 None => break,
             },
+            _ = keepalive.tick() => {
+                if last_inbound.elapsed() > KEEPALIVE_TIMEOUT {
+                    log::warn!("No traffic for {:?}; declaring the connection dead", KEEPALIVE_TIMEOUT);
+                    break;
+                }
+            }
             next = stream.next() => {
                 let Some(next) = next else {
                     log::warn!("Connection closed by peer");
@@ -320,6 +354,7 @@ async fn run_reader(
                     }
                 };
 
+                last_inbound = tokio::time::Instant::now();
                 let frame_type = frame.command.type_();
                 let inbound = match Inbound::try_from(frame) {
                     Ok(inbound) => inbound,

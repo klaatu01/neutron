@@ -160,6 +160,13 @@ impl Inflight {
         }
     }
 
+    /// Remove a registered waiter whose request never made it onto the
+    /// wire (the queue rejected it after registration). Dropping the
+    /// sender completes the receiver with a recv error.
+    pub(crate) fn forget(&self, key: &CorrelationKey) {
+        self.entries.lock().unwrap().remove(key);
+    }
+
     /// Fail every entry whose deadline has passed with
     /// [`NeutronError::OperationTimeout`]. Returns how many expired.
     pub(crate) fn sweep(&self) -> usize {
