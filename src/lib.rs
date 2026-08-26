@@ -11,8 +11,9 @@ mod producer;
 mod pulsar;
 mod registry;
 
-#[cfg(test)]
-mod fake_broker;
+#[cfg(any(test, feature = "bench"))]
+#[doc(hidden)]
+pub mod fake_broker;
 #[cfg(test)]
 mod integration_tests;
 

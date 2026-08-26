@@ -42,3 +42,16 @@ nanoid = "0.4.0"
 
 [features]
 json = ["serde_json"]
+# Exposes the in-process protocol server for benchmarking; not public API.
+bench = []
+
+[[example]]
+name = "bench_broker"
+required-features = ["bench"]
+
+[[example]]
+name = "bench_producer"
+
+[[example]]
+name = "bench_consumer"
+
