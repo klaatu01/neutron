@@ -7,7 +7,7 @@
 //! `bench_broker` example serves it to external clients — including
 //! other Pulsar client implementations).
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::{SinkExt, StreamExt};
@@ -58,12 +58,24 @@ enum PushCmd {
 }
 
 /// When set, every FLOW is answered by pushing `permits` messages of
-/// `payload_size` bytes to that consumer, until `remaining` runs dry —
-/// the broker becomes a load generator paced by the client's own flow
-/// control.
+/// `payload_size` bytes to that consumer, until that consumer's quota
+/// runs dry — the broker becomes a load generator paced by each
+/// client's own flow control.
 struct AutoFeed {
     payload_size: usize,
-    remaining: AtomicU64,
+    quota: u64,
+    remaining: Mutex<std::collections::HashMap<u64, u64>>,
+}
+
+impl AutoFeed {
+    /// Take up to `want` messages from `consumer_id`'s quota.
+    fn take(&self, consumer_id: u64, want: u64) -> u64 {
+        let mut remaining = self.remaining.lock().unwrap();
+        let left = remaining.entry(consumer_id).or_insert(self.quota);
+        let granted = want.min(*left);
+        *left -= granted;
+        granted
+    }
 }
 
 struct BrokerState {
@@ -159,12 +171,13 @@ impl FakeBroker {
         }
     }
 
-    /// Serve `total` messages of `payload_size` bytes to consumers, paced
-    /// by their own FLOW credit.
-    pub fn auto_feed(&self, payload_size: usize, total: u64) {
+    /// Serve `quota` messages of `payload_size` bytes to each consumer,
+    /// paced by its own FLOW credit.
+    pub fn auto_feed(&self, payload_size: usize, quota: u64) {
         *self.state.auto_feed.lock().unwrap() = Some(Arc::new(AutoFeed {
             payload_size,
-            remaining: AtomicU64::new(total),
+            quota,
+            remaining: Mutex::new(std::collections::HashMap::new()),
         }));
     }
 
@@ -267,15 +280,9 @@ async fn serve_connection(stream: TcpStream, state: Arc<BrokerState>) {
                         let feed = state.auto_feed.lock().unwrap().clone();
                         if let Some(feed) = feed {
                             let payload = vec![0x6eu8; feed.payload_size];
-                            for _ in 0..flow.messagePermits() {
-                                let credit = feed.remaining.fetch_update(
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
-                                    |remaining| remaining.checked_sub(1),
-                                );
-                                if credit.is_err() {
-                                    break;
-                                }
+                            let granted =
+                                feed.take(flow.consumer_id(), flow.messagePermits() as u64);
+                            for _ in 0..granted {
                                 let entry_id = next_entry_id;
                                 next_entry_id += 1;
                                 let message =

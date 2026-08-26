@@ -55,3 +55,6 @@ name = "bench_producer"
 [[example]]
 name = "bench_consumer"
 
+[[example]]
+name = "bench_multi"
+

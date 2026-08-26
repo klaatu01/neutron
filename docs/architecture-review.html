@@ -1062,6 +1062,78 @@
     </figcaption>
   </figure>
 
+
+  <div class="col">
+    <h3>The mixed workload: where topology shows</h3>
+    <p>
+      The single-lane benchmarks measure the hot path; this one measures the
+      <em>shape</em>. N producers and N consumers run concurrently in one
+      process, all multiplexed over the one connection every client library
+      opens per broker &#8212; producers pushing 200k receipts, consumers
+      draining 200k deliveries, at the same time. The reported rate counts
+      every message moved, in either direction.
+    </p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 880 328" role="img" aria-label="Grouped bar chart: mixed concurrent producer and consumer workloads at 4, 8, and 32 clients per side; neutron sustains around 330 to 385 thousand messages moved per second at every concurrency level while pulsar-client-cpp stays pinned near 28 thousand and pulsar-rs near 120 thousand">
+      <g font-family="IBM Plex Mono, ui-monospace, monospace">
+        <rect x="470" y="8" width="10" height="10" rx="2" fill="var(--chart-rust)"></rect>
+        <text class="t-s" x="486" y="17">neutron</text>
+        <rect x="580" y="8" width="10" height="10" rx="2" fill="var(--chart-cpp)"></rect>
+        <text class="t-s" x="596" y="17">pulsar-cpp 4.1</text>
+        <rect x="720" y="8" width="10" height="10" rx="2" fill="var(--chart-rs)"></rect>
+        <text class="t-s" x="736" y="17">pulsar-rs 6.9</text>
+      </g>
+
+      <text class="t-b" x="24" y="52">4 producers &#183; 4 consumers</text>
+      <text class="t-hot" x="330" y="52">11.6&#215; / 2.8&#215;</text>
+      <rect x="124" y="62" width="500" height="14" rx="2" fill="var(--chart-rust)"></rect>
+      <text class="t-s" x="116" y="73" text-anchor="end">neutron</text>
+      <text class="t" x="632" y="73">331.3k moved/s</text>
+      <rect x="124" y="80" width="43" height="14" rx="2" fill="var(--chart-cpp)"></rect>
+      <text class="t-s" x="116" y="91" text-anchor="end">cpp</text>
+      <text class="t" x="175" y="91">28.6k moved/s</text>
+      <rect x="124" y="98" width="179" height="14" rx="2" fill="var(--chart-rs)"></rect>
+      <text class="t-s" x="116" y="109" text-anchor="end">rs</text>
+      <text class="t" x="311" y="109">118.3k moved/s</text>
+
+      <text class="t-b" x="24" y="154">8 producers &#183; 8 consumers</text>
+      <text class="t-hot" x="330" y="154">13.5&#215; / 3.1&#215;</text>
+      <rect x="124" y="164" width="500" height="14" rx="2" fill="var(--chart-rust)"></rect>
+      <text class="t-s" x="116" y="175" text-anchor="end">neutron</text>
+      <text class="t" x="632" y="175">384.9k moved/s</text>
+      <rect x="124" y="182" width="37" height="14" rx="2" fill="var(--chart-cpp)"></rect>
+      <text class="t-s" x="116" y="193" text-anchor="end">cpp</text>
+      <text class="t" x="169" y="193">28.5k moved/s</text>
+      <rect x="124" y="200" width="164" height="14" rx="2" fill="var(--chart-rs)"></rect>
+      <text class="t-s" x="116" y="211" text-anchor="end">rs</text>
+      <text class="t" x="296" y="211">126.0k moved/s</text>
+
+      <text class="t-b" x="24" y="256">32 producers &#183; 32 consumers</text>
+      <text class="t-hot" x="356" y="256">12.1&#215; / 2.9&#215;</text>
+      <rect x="124" y="266" width="500" height="14" rx="2" fill="var(--chart-rust)"></rect>
+      <text class="t-s" x="116" y="277" text-anchor="end">neutron</text>
+      <text class="t" x="632" y="277">329.3k moved/s</text>
+      <rect x="124" y="284" width="41" height="14" rx="2" fill="var(--chart-cpp)"></rect>
+      <text class="t-s" x="116" y="295" text-anchor="end">cpp</text>
+      <text class="t" x="173" y="295">27.3k moved/s</text>
+      <rect x="124" y="302" width="173" height="14" rx="2" fill="var(--chart-rs)"></rect>
+      <text class="t-s" x="116" y="313" text-anchor="end">rs</text>
+      <text class="t" x="305" y="313">113.8k moved/s</text>
+    </svg>
+    <figcaption>
+      <b>Fig 7 &#8212; Mixed workload: N producers + N consumers, one connection,
+      100&nbsp;B, 200k messages each direction.</b> Medians of 3 runs after
+      warmup; bars scaled within each group. The flat lines are the finding:
+      from 4 to 32 clients per side, every client's number stays where its
+      per-connection serialization point puts it &#8212; the C++ client's one IO
+      thread pins it near 28k whatever the client count, pulsar-rs's single
+      connection actor holds it near 120k, and neutron's split reader/writer
+      tasks absorb the concurrency at 330&#8211;385k.
+    </figcaption>
+  </figure>
+
   <div class="tbl-wrap">
     <table>
       <thead>
@@ -1073,9 +1145,14 @@
         <tr><td class="k">producer, batched &#215;500</td><td>100 B</td><td>1,902,810</td><td>287,135</td><td>185,693</td><td class="yes">6.6&#215;</td><td class="yes">10.3&#215;</td></tr>
         <tr><td class="k">consumer</td><td>100 B</td><td>157,868</td><td>84,166</td><td>74,854</td><td class="yes">1.9&#215;</td><td class="yes">2.1&#215;</td></tr>
         <tr><td class="k">consumer</td><td>4 KB</td><td>52,834</td><td>45,692</td><td>35,143</td><td class="yes">1.2&#215;</td><td class="yes">1.5&#215;</td></tr>
+        <tr><td class="k">mixed, 4p + 4c &#8224;</td><td>100 B</td><td>331,349</td><td>28,647</td><td>118,314</td><td class="yes">11.6&#215;</td><td class="yes">2.8&#215;</td></tr>
+        <tr><td class="k">mixed, 8p + 8c &#8224;</td><td>100 B</td><td>384,864</td><td>28,466</td><td>125,966</td><td class="yes">13.5&#215;</td><td class="yes">3.1&#215;</td></tr>
+        <tr><td class="k">mixed, 32p + 32c &#8224;</td><td>100 B</td><td>329,268</td><td>27,297</td><td>113,816</td><td class="yes">12.1&#215;</td><td class="yes">2.9&#215;</td></tr>
       </tbody>
     </table>
   </div>
+
+  <p class="col" style="font-family:var(--mono); font-size:11.5px; color:var(--muted); margin-top:-14px">&#8224; mixed rows count messages moved in either direction (200k published + 200k delivered per run).</p>
 
   <div class="col">
     <h3>What the numbers say &#8212; and what they don't</h3>

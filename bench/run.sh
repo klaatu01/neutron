@@ -28,6 +28,9 @@ CPP_PRODUCER=./bench/cpp_producer
 CPP_CONSUMER=./bench/cpp_consumer
 RS_PRODUCER=./bench/pulsar-rs/target/release/producer
 RS_CONSUMER=./bench/pulsar-rs/target/release/consumer
+NEUTRON_MULTI=./target/release/examples/bench_multi
+CPP_MULTI=./bench/cpp_multi
+RS_MULTI=./bench/pulsar-rs/target/release/multi
 
 : > "$OUT"
 port=$PORT_BASE
@@ -56,9 +59,20 @@ run_one() { # broker_env client_cmd run_index
 }
 
 for size in $SIZES; do
-    for mode in "producer" "producer-batched" "consumer"; do
+    for mode in "producer" "producer-batched" "consumer" "multi-4x4" "multi-8x8" "multi-32x32"; do
         run_count=$COUNT
         case "$mode" in
+        multi-*)
+            # Mixed workloads are a concurrency test, not a bandwidth test.
+            if [ "$size" != "100" ]; then continue; fi
+            workers=${mode#multi-}; workers=${workers%x*}
+            feed=$((run_count / workers))
+            configs=(
+                "neutron|$NEUTRON_MULTI|SIZE=$size PRODUCERS=$workers CONSUMERS=$workers|FEED_COUNT=$feed FEED_SIZE=$size"
+                "pulsar-cpp|$CPP_MULTI|SIZE=$size PRODUCERS=$workers CONSUMERS=$workers|FEED_COUNT=$feed FEED_SIZE=$size"
+                "pulsar-rs|$RS_MULTI|SIZE=$size PRODUCERS=$workers CONSUMERS=$workers|FEED_COUNT=$feed FEED_SIZE=$size"
+            )
+            ;;
         producer)
             configs=(
                 "neutron|$NEUTRON_PRODUCER|SIZE=$size BATCH=0|"

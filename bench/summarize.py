@@ -13,6 +13,8 @@ CLIENTS = ["neutron", "pulsar-cpp", "pulsar-rs"]
 def mode_of(row):
     if row["bench"] == "consumer":
         return "consumer"
+    if row["bench"] == "multi":
+        return f"multi-{row['producers']}x{row['consumers']}"
     batched = row.get("batch", 0) or row.get("batching") in (True, "true")
     return "producer-batched" if batched else "producer"
 

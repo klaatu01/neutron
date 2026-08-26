@@ -3,8 +3,8 @@
 //! lightweight protocol endpoint.
 //!
 //!   PORT        listen port (default 6650)
-//!   FEED_COUNT  if set, auto-feed this many messages to consumers,
-//!               paced by their FLOW credit
+//!   FEED_COUNT  if set, auto-feed this many messages to each consumer,
+//!               paced by its FLOW credit
 //!   FEED_SIZE   payload bytes for auto-fed messages (default 100)
 
 use neutron::fake_broker::FakeBroker;
@@ -29,7 +29,10 @@ async fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(100);
         broker.auto_feed(size, count);
-        println!("READY {} feeding {}x{}B", broker.port, count, size);
+        println!(
+            "READY {} feeding {}x{}B per consumer",
+            broker.port, count, size
+        );
     } else {
         println!("READY {}", broker.port);
     }
